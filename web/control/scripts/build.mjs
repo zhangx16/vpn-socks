@@ -1,0 +1,11 @@
+import {readFile,mkdir,rm,copyFile,writeFile} from 'node:fs/promises';
+const root=new URL('../',import.meta.url);
+await rm(new URL('dist/',root),{recursive:true,force:true});
+await mkdir(new URL('dist/server/',root),{recursive:true});
+await mkdir(new URL('dist/.openai/',root),{recursive:true});
+const core=await readFile(new URL('worker/core.mjs',root),'utf8');
+const page=await readFile(new URL('worker/page.html',root),'utf8');
+const handler=await readFile(new URL('worker/handler.mjs',root),'utf8');
+await writeFile(new URL('dist/server/index.js',root),core+'\nconst page='+JSON.stringify(page)+';\n'+handler);
+await copyFile(new URL('.openai/hosting.json',root),new URL('dist/.openai/hosting.json',root));
+console.log('Worker artifact built');

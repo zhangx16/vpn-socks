@@ -1,0 +1,8 @@
+dist/
+site.tar.gz
+
+.env
+.env.*
+scripts/live-check.mjs
+
+.openai/hosting.json

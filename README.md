@@ -147,3 +147,20 @@ sh -n install.sh
 - `openrc/`：三个进程的守护和开机自启服务。
 
 依赖与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+## 网页任务台
+
+`web/control/` 提供仅本人可访问的 Sites 控制页：选择节点后，一键设置 Cloudflare 橙云 A 记录、Origin Rules 回源端口、主机名级 TLS Full/Strict，并通过 WebSocket 握手验收。支持只读检查、失败时恢复本次已完成的写入、逐步进度、导出结果和不含凭据的本机任务摘要。
+
+CF Token 存在 Sites 的服务器运行时 Secret `CF_API_TOKEN` 中；节点预设使用 Secret `NODE_PRESETS`。源代码不包含实际 Token、服务器密码或节点私有配置。所需权限为 `Zone → Zone → Read`、`Zone → DNS → Edit`、`Zone → Origin Rules → Edit`、`Zone → Config Rules → Edit`，资源限定为目标 Zone。
+
+该页面负责 CF 配置和链路验收；服务器上的出口健康检测与 20 Mbps 自动优选仍由上述 OpenRC 服务运行。WebSocket 握手成功不能独立证明最终 VPN 出口位置，完整代理出口仍应通过节点客户端检查。
+
+构建前将 `web/control/.openai/hosting.example.json` 复制为 `.openai/hosting.json` 并填入当前 Sites 的项目 ID。保持 Site 为 owner-private，API 依赖 Sites 注入的已登录身份，不应直接部署为未经认证的公开 Worker。
+
+```sh
+cd web/control
+node --test scripts/test.mjs
+bash scripts/build.sh
+node scripts/validate-artifact.mjs
+```
