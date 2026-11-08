@@ -1,0 +1,139 @@
+# vpn-socks
+
+给 [byJoey/fanout](https://github.com/byJoey/fanout) 增加日本出口热备、Cloudflare → VLESS 完整链路检测，以及低带宽触发的出口库自动优选。适用于已经配置好 VLESS WebSocket、Cloudflare 端口回源的 Alpine/OpenRC NAT 服务器。
+
+## 默认策略
+
+| 项目 | 默认值 |
+|---|---|
+| 低速阈值 | **20 Mbps**，约 2.5 MB/s，按完整 CF 链路计算 |
+| 带宽抽测 | 每 5 分钟，最多下载 8 MB，最多等待 12 秒 |
+| 触发条件 | 同一当前出口连续 3 次有效测速低于阈值 |
+| 全库扫描冷却 | 扫描开始后至少间隔 1 小时 |
+| 候选范围 | 最新 VPN Gate 列表中的日本、通过上游家宽筛选的节点 |
+| 扫描 | 独立网络命名空间逐个连接、核验出口 IP、下载测速 |
+| 复测 | 首轮结果从快到慢，最多收集 6 个通过双次复测的候选 |
+| 替换 | 按复测结果选择最快、第二快的不同出口作为主备 |
+| 生效检查 | 主出口通过 CF 链路验证、备用再次连通，才清理旧的受管出口 |
+| 最小收益 | 新 CF 路径相对触发时样本至少提升 20%，否则请求恢复原出口 |
+| 断网恢复 | 独立健康守护继续工作；扫描期间保持旧出口和客户端参数 |
+
+节点 UUID、WS 路径、客户端域名及 CF 回源规则不随出口替换而改变。切换会重启 fanout 管理的 Xray，现有连接可能中断。公共出口速度会变化，测速排名代表当次测量。
+
+“家宽”沿用上游的启发式筛选：排除 `public-vpn-*` 和 `219.100.37.0/24`，并非运营商或住宅属性的独立认证。只有可连接、能正常下载、且出口 IP 符合预期的候选会参与排名。
+
+## 安装前准备
+
+- Alpine Linux / OpenRC、root，以及可用的 `/dev/net/tun`、network namespace、veth、iptables 转发。
+- 按 [fanout 上游说明](https://github.com/byJoey/fanout#安装)安装 fanout，使用 **native Xray** 后端。Xray 路径为 `/var/lib/fanout/bin/xray`；管理端口设为 **33001**。
+- 在 fanout 中创建 `33002` 的 VLESS WS 入站，以及 `33003` 的 VLESS WS TLS 入站。两者使用同一个日本出口；另创建一条没有绑定入站的日本备用出口。
+- 设置 CF 橙云域名、目的端口 **33003**，确保现有节点已经能经 CF 访问。源站若为自签证书，主机名使用 CF Full 模式；可信源站证书可以使用 Full (strict)。
+- 本版本固定使用上述端口、入站 tag `in-33002-ws` / `in-33003-ws`，以及本机健康代理 `127.0.0.1:10809` / `10810`。适配不同端口时需要修改脚本，不能只改 README 中的示例。
+
+```sh
+git clone https://github.com/zhangx16/vpn-socks.git
+cd vpn-socks
+sh install.sh node.example.com
+```
+
+将 `node.example.com` 替换为已配置的 CF 节点域名。安装器从服务器现有的 fanout 私有配置读取 UUID、路径和证书，生成只监听本机的健康客户端，不要求将凭据写入项目。
+
+安装器首次采用当前日本出口及一条未绑定的日本备用出口作为受管主备。此后只清理该受管集合和优化器自己创建的临时出口，不删除其他已有入站绑定。受管槽位保存在 `/var/lib/fanout-speed/managed-slots.json`。
+
+若 LXC 中 `ip netns exec` 报 `/sys` 挂载权限错误，而 `nsenter --net=...` 可用，可以启用已提供的兼容包装：
+
+```sh
+FANOUT_LXC_COMPAT=1 sh install.sh node.example.com
+```
+
+它只修改 fanout 服务的 PATH；启用时会重启 fanout，短暂中断现有连接。
+
+## 工作流程
+
+```mermaid
+flowchart TD
+    A[每 5 分钟测完整 CF 链路] --> B{连续 3 次低于 20 Mbps?}
+    B -- 否 --> A
+    B -- 是 --> C{距上轮扫描已超过 1 小时?}
+    C -- 否 --> A
+    C -- 是 --> D[刷新出口库并逐个实测]
+    D --> E[速度靠前候选双次复测]
+    E --> F[建立最快和第二快的不同出口]
+    F --> G[请求健康守护切换并验证 CF 链路]
+    G --> H{验证和收益检查通过?}
+    H -- 是 --> I[保留新主备并清理旧受管出口]
+    H -- 否 --> J[保留旧出口或请求恢复原出口]
+    I --> A
+    J --> A
+```
+
+带宽守护和健康守护是两个进程。全库扫描可能持续数分钟，期间断网自动切换仍由健康守护负责。测速目标 HTTP 错误或不可达不计为低速；HTTP 200 下载因超时仅取得部分数据时，按已下载字节计算速度。更换当前出口会重置连续低速计数。
+
+没有两条候选通过复测、连接失败、出口不符、CF 验证失败或收益不足时，不会清空原有主备。恢复原出口也依赖原出口当时可用；若它同时故障，由健康守护继续恢复。
+
+## 修改阈值
+
+配置文件：`/etc/fanout-speed.json`。每轮检查重新读取配置，无需重启：
+
+```json
+{
+  "threshold_mbps": 20,
+  "check_interval_seconds": 300,
+  "consecutive_low": 3,
+  "scan_cooldown_seconds": 3600,
+  "sample_bytes": 8000000,
+  "sample_timeout_seconds": 12,
+  "finalists": 6,
+  "minimum_gain_ratio": 1.2
+}
+```
+
+Mbps 为十进制兆比特每秒，MB/s 为十进制兆字节每秒。抽测按默认值每天最多约 2.3 GB 下载流量；一次 35 节点扫描的理论下载上限约 236 MB（35×4 MB 首测，加 6×2×8 MB 复测），另有少量连通性和应用验证流量。扫描失败也受冷却限制。实际候选数量随公共出口库变化。
+
+## 状态和维护
+
+```sh
+rc-service fanout-ha status
+rc-service fanout-probe status
+rc-service fanout-speed status
+cat /var/lib/fanout-ha/status.json
+cat /var/lib/fanout-speed/state.json
+cat /var/lib/fanout-speed/selection.json
+tail -n 50 /var/log/fanout-speed.log
+```
+
+`state.json` 包含最近 CF 测速、阈值、连续低速次数、扫描状态和最近错误。全库进度位于它的 `scan_directory` 对应的 `progress.log`。最多保留最近三轮扫描报告。
+
+手动执行一轮采样或立即扫描时，先停带宽守护以释放锁。健康守护保持运行：
+
+```sh
+rc-service fanout-speed stop
+fanout-speed --once       # 一次采样，达到条件时会扫描
+# 或 fanout-speed --scan-now  # 跳过连续次数和冷却，立即验证一轮扫描
+rc-service fanout-speed start
+```
+
+仅暂停带宽优化：`rc-service fanout-speed stop`。取消开机启动：`rc-update del fanout-speed default`。健康守护可继续工作。修改现有 VLESS UUID、域名或 WS 路径后，重新运行安装器生成健康配置。
+
+服务日志按天、最大 1 MB 触发轮转，保留四份。报告、密码、证书、运行时状态都保存在服务器私有目录，禁止提交到 Git。
+
+## 测试
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 -m py_compile bin/fanout-speed libexec/scan-jp scripts/configure-probes.py
+bash -n bin/fanout-ha
+sh -n install.sh
+```
+
+单元测试覆盖 20 Mbps 边界、连续计数、出口变更、测速错误、冷却和出口清理保护。真实扫描、主备切换及 CF 验证需要配置好上述环境；测试不会主动连接真实 VPN Gate 节点。
+
+## 文件
+
+- `bin/fanout-ha`：完整链路健康守护与串行切换请求处理。
+- `bin/fanout-speed`：低速检测、扫描编排、主备替换和回滚请求。
+- `libexec/scan-jp`：独立命名空间中的出口库测速。
+- `scripts/configure-probes.py`：读取本机私有配置，生成 CF 和源站健康客户端。
+- `openrc/`：三个进程的守护和开机自启服务。
+
+依赖与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
