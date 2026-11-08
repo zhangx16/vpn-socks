@@ -1,0 +1,5 @@
+{
+  "region": "JP",
+  "primary_inbound_tag": "in-33003-ws",
+  "inbound_tags": ["in-33003-ws", "in-33002-ws"]
+}

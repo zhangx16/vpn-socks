@@ -1,0 +1,10 @@
+{
+  "threshold_mbps": 20,
+  "check_interval_seconds": 300,
+  "consecutive_low": 3,
+  "scan_cooldown_seconds": 3600,
+  "sample_bytes": 8000000,
+  "sample_timeout_seconds": 12,
+  "finalists": 6,
+  "minimum_gain_ratio": 1.2
+}

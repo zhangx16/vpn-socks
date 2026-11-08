@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+name="fanout-speed"
+description="Low-speed detection and Japanese exit pool optimization"
+command="/usr/local/sbin/fanout-speed"
+command_background=true
+pidfile="/run/fanout-speed.pid"
+supervisor=supervise-daemon
+respawn_delay=10
+respawn_max=0
+output_log="/var/log/fanout-speed.log"
+error_log="/var/log/fanout-speed.log"
+depend() { need net fanout fanout-probe fanout-ha; }

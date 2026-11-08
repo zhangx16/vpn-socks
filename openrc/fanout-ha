@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+name="fanout-ha"
+description="Residential exit failover and CF end-to-end health monitor"
+command="/usr/local/sbin/fanout-ha"
+command_background=true
+pidfile="/run/fanout-ha.pid"
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
+output_log="/var/log/fanout-ha.log"
+error_log="/var/log/fanout-ha.log"
+depend() { need net fanout fanout-probe; }

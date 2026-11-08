@@ -1,6 +1,6 @@
 # vpn-socks
 
-给 [byJoey/fanout](https://github.com/byJoey/fanout) 增加日本出口热备、Cloudflare → VLESS 完整链路检测，以及低带宽触发的出口库自动优选。适用于已经配置好 VLESS WebSocket、Cloudflare 端口回源的 Alpine/OpenRC NAT 服务器。
+给 [byJoey/fanout](https://github.com/byJoey/fanout) 增加同地区出口热备、Cloudflare → VLESS 完整链路检测，以及低带宽触发的出口库自动优选。支持日本 `JP` 和韩国 `KR`，每台服务器只从选定国家的出口库选择主备。适用于已经配置好 VLESS WebSocket、Cloudflare 端口回源的 Alpine/OpenRC NAT 服务器。
 
 ## 默认策略
 
@@ -10,7 +10,7 @@
 | 带宽抽测 | 每 5 分钟，最多下载 8 MB，最多等待 12 秒 |
 | 触发条件 | 同一当前出口连续 3 次有效测速低于阈值 |
 | 全库扫描冷却 | 扫描开始后至少间隔 1 小时 |
-| 候选范围 | 最新 VPN Gate 列表中的日本、通过上游家宽筛选的节点 |
+| 候选范围 | 最新 VPN Gate 列表中选定国家、通过上游家宽筛选的节点 |
 | 扫描 | 独立网络命名空间逐个连接、核验出口 IP、下载测速 |
 | 复测 | 首轮结果从快到慢，最多收集 6 个通过双次复测的候选 |
 | 替换 | 按复测结果选择最快、第二快的不同出口作为主备 |
@@ -25,10 +25,10 @@
 ## 安装前准备
 
 - Alpine Linux / OpenRC、root，以及可用的 `/dev/net/tun`、network namespace、veth、iptables 转发。
-- 按 [fanout 上游说明](https://github.com/byJoey/fanout#安装)安装 fanout，使用 **native Xray** 后端。Xray 路径为 `/var/lib/fanout/bin/xray`；管理端口设为 **33001**。
+- 按 [fanout 上游说明](https://github.com/byJoey/fanout#安装)安装 fanout，使用 **native Xray** 后端。Xray 路径为 `/var/lib/fanout/bin/xray`；管理端口从 `/var/lib/fanout/settings.json` 自动读取，建议仅本机监听。
 - 在 fanout 中创建 `33002` 的 VLESS WS 入站，以及 `33003` 的 VLESS WS TLS 入站。两者使用同一个日本出口；另创建一条没有绑定入站的日本备用出口。
 - 设置 CF 橙云域名、目的端口 **33003**，确保现有节点已经能经 CF 访问。源站若为自签证书，主机名使用 CF Full 模式；可信源站证书可以使用 Full (strict)。
-- 本版本固定使用上述端口、入站 tag `in-33002-ws` / `in-33003-ws`，以及本机健康代理 `127.0.0.1:10809` / `10810`。适配不同端口时需要修改脚本，不能只改 README 中的示例。
+- 默认使用上述节点端口；可通过安装参数指定单个 TLS 入站端口。入站 tag 和地区写入 `/etc/fanout-ha.json`。本机健康代理固定为 `127.0.0.1:10809` / `10810`。
 
 ```sh
 git clone https://github.com/zhangx16/vpn-socks.git
@@ -38,7 +38,15 @@ sh install.sh node.example.com
 
 将 `node.example.com` 替换为已配置的 CF 节点域名。安装器从服务器现有的 fanout 私有配置读取 UUID、路径和证书，生成只监听本机的健康客户端，不要求将凭据写入项目。
 
-安装器首次采用当前日本出口及一条未绑定的日本备用出口作为受管主备。此后只清理该受管集合和优化器自己创建的临时出口，不删除其他已有入站绑定。受管槽位保存在 `/var/lib/fanout-speed/managed-slots.json`。
+只有一个可用公网端口的韩国部署示例：先在 fanout 创建 **35001** 的 VLESS WS TLS 入站，绑定韩国出口，再创建一条未绑定的韩国热备。CF 回源端口设为 35001，然后运行：
+
+```sh
+sh install.sh kr.example.com KR 35001
+```
+
+管理界面仍可使用任意空闲本机端口，例如 `127.0.0.1:33011`；通过 SSH 转发访问，无需占用公开端口。该模式只操作 `in-35001-ws`，全库扫描、故障恢复和热备均限定在韩国。
+
+安装器首次采用选定国家的当前出口及一条未绑定的同国家备用出口作为受管主备。此后只清理该受管集合和优化器自己创建的临时出口，不删除其他已有入站绑定。受管槽位保存在 `/var/lib/fanout-speed/managed-slots.json`。
 
 若 LXC 中 `ip netns exec` 报 `/sys` 挂载权限错误，而 `nsenter --net=...` 可用，可以启用已提供的兼容包装：
 
@@ -47,6 +55,8 @@ FANOUT_LXC_COMPAT=1 sh install.sh node.example.com
 ```
 
 它只修改 fanout 服务的 PATH；启用时会重启 fanout，短暂中断现有连接。
+
+在此兼容模式中，`nsenter` 会保留宿主的 DNS 配置。若 DNS 是 RFC1918 内网 IPv4 地址，包装器和扫描器会在各自命名空间内为该 DNS 添加经宿主网关的专用路由，避免 OpenVPN 默认路由把内网 DNS 请求送入 VPN。宿主 DNS 配置保持原样；这些 DNS 查询由宿主 DNS 处理，业务连接经过所选 VPN 出口。
 
 ## 工作流程
 

@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Slow-link detection and transactional replacement of a managed fanout pair."""
+import argparse
+import fcntl
+import http.cookiejar
+import json
+import os
+import shutil
+import signal
+import subprocess
+import time
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+
+ROOT = Path('/var/lib/fanout-speed')
+HA = Path('/var/lib/fanout-ha')
+CONFIG = Path('/etc/fanout-speed.json')
+HA_CONFIG = Path('/etc/fanout-ha.json')
+DEFAULTS = dict(threshold_mbps=20, check_interval_seconds=300, consecutive_low=3,
+                scan_cooldown_seconds=3600, sample_bytes=8000000,
+                sample_timeout_seconds=12, finalists=6, minimum_gain_ratio=1.2)
+child = None
+
+def log(message):
+    print(time.strftime('%Y-%m-%dT%H:%M:%S%z')+' '+message, flush=True)
+
+def read_json(path, default):
+    try: return json.loads(Path(path).read_text())
+    except (OSError, ValueError): return default
+
+def write_json(path, data):
+    path = Path(path)
+    temporary = path.with_name(path.name+'.tmp')
+    temporary.write_text(json.dumps(data, indent=2)+'\n')
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
+
+def configuration():
+    config = DEFAULTS | read_json(CONFIG, {})
+    config['region']=read_json(HA_CONFIG,{}).get('region','JP')
+    if config['region'] not in ('JP','KR'): raise ValueError('region must be JP or KR')
+    limits = dict(threshold_mbps=(0.1,10000), check_interval_seconds=(60,86400),
+                  consecutive_low=(1,20), scan_cooldown_seconds=(600,86400),
+                  sample_bytes=(1000000,8000000), sample_timeout_seconds=(5,60),
+                  finalists=(2,10), minimum_gain_ratio=(1,5))
+    for key,(low,high) in limits.items():
+        if not isinstance(config[key], (float,int)) or not low <= config[key] <= high:
+            raise ValueError('invalid configuration: '+key)
+    for key in ('check_interval_seconds','consecutive_low','scan_cooldown_seconds','sample_bytes','sample_timeout_seconds','finalists'):
+        if not isinstance(config[key],int): raise ValueError('configuration must be an integer: '+key)
+    return config
+
+def low_streak(previous, host, bps, config):
+    """Unavailable samples never count as evidence of low throughput."""
+    if bps is None or bps*8/1000000 >= config['threshold_mbps']: return 0
+    return (int(previous.get('low_count',0)) if previous.get('sample_host')==host else 0)+1
+
+class API:
+    def __init__(self):
+        bp=Path('/var/lib/fanout/basepath').read_text().strip()
+        port=read_json('/var/lib/fanout/settings.json',{}).get('port',33001)
+        self.base='http://127.0.0.1:'+str(port)+'/'+bp
+        self.opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        password=Path('/var/lib/fanout/password').read_text().strip()
+        self.call('/login', method='POST', data={'password':password})
+
+    def call(self, path, method='GET', data=None):
+        encoded=urllib.parse.urlencode(data).encode() if data is not None else None
+        request=urllib.request.Request(self.base+path, data=encoded, method=method)
+        with self.opener.open(request, timeout=10) as response:
+            return json.load(response)
+
+    def view(self): return self.call('/api/exits')
+
+    @staticmethod
+    def active(view):
+        tag=read_json(HA_CONFIG,{}).get('primary_inbound_tag','in-33003-ws')
+        return next((r for r in view['exits'] if any(i['tag']==tag for i in r.get('inbounds') or [])), None)
+
+    def stop_unused(self, slot, protected):
+        view=self.view()
+        row=next((r for r in view['exits'] if r['slot']==slot), None)
+        if row is None: return True
+        if slot in protected or row.get('inbounds'): return False
+        self.call('/api/stop?'+urllib.parse.urlencode({'slot':slot}), method='POST')
+        return True
+
+def throughput(config, proxy='socks5h://127.0.0.1:10809', auth=None):
+    args=['curl','-4','-sS','--connect-timeout','4','--max-time',str(config['sample_timeout_seconds']),
+          '--proxy',proxy,'-o','/dev/null','-w','%{http_code} %{size_download} %{speed_download}',
+          'https://speed.cloudflare.com/__down?bytes='+str(config['sample_bytes'])]
+    if auth: args += ['-U',auth]
+    result=subprocess.run(args, capture_output=True, text=True, timeout=config['sample_timeout_seconds']+5)
+    fields=result.stdout.strip().split()
+    if len(fields)!=3 or fields[0]!='200' or int(fields[1])<=0: return None
+    # A partial HTTP 200 transfer after timeout is still a valid low-bandwidth measurement.
+    if result.returncode not in (0,28): return None
+    return float(fields[2])
+
+def exit_valid(row):
+    args=['curl','-4','-fsS','--connect-timeout','3','--max-time','8',
+          '--proxy','socks5h://127.0.0.1:'+str(row['port']),
+          '-U',row['socks_user']+':'+row['socks_pass'],'https://api.ipify.org']
+    result=subprocess.run(args, capture_output=True, text=True, timeout=12)
+    return result.returncode==0 and result.stdout.strip()==row['exit_ip']
+
+def request_switch(row):
+    identity=uuid.uuid4().hex
+    request=dict(id=identity,slot=row['slot'],host=row['host'],ip=row['exit_ip'])
+    write_json(HA/'switch-request.json', request)
+    deadline=time.monotonic()+75
+    while time.monotonic()<deadline:
+        result=read_json(HA/'switch-result.json', {})
+        if result.get('id')==identity: return result.get('result')=='applied'
+        time.sleep(1)
+    # Cancel only our own request, leaving other writers' requests intact.
+    if read_json(HA/'switch-request.json',{}).get('id')==identity:
+        (HA/'switch-request.json').unlink(missing_ok=True)
+    return False
+
+def ensure_candidate(api, candidate, created):
+    existing=next((r for r in api.view()['exits'] if r['host']==candidate['host']),None)
+    if existing and existing['status']=='up' and existing['exit_ip']==candidate['ip'] and exit_valid(existing):
+        return existing
+    if existing: return None
+    result=api.call('/api/start?'+urllib.parse.urlencode({'host':candidate['host']}),method='POST')
+    slot=result['slot']; created.add(slot)
+    deadline=time.monotonic()+60
+    while time.monotonic()<deadline:
+        row=next((r for r in api.view()['exits'] if r['slot']==slot),None)
+        if row is None: return None
+        # fanout can fall back to another host; its old speed measurement would be invalid.
+        if row['host']!=candidate['host'] or row['status']=='failed': break
+        if row['status']=='up':
+            return row if row['exit_ip']==candidate['ip'] and exit_valid(row) else None
+        time.sleep(2)
+    api.stop_unused(slot,set())
+    return None
+
+def scan_and_replace(config, state, baseline):
+    global child
+    stamp=time.strftime('%Y%m%d-%H%M%S')
+    work=ROOT/'scans'/stamp
+    work.mkdir(parents=True,mode=0o700)
+    state.update(phase='scanning',last_scan_started=time.time(),scan_directory=str(work),low_count=0)
+    write_json(ROOT/'state.json',state)
+    log('low-bandwidth '+config['region']+' scan started; keeping existing exits and health watchdog running')
+    created=set(); selected=[]; old_managed=set(read_json(ROOT/'managed-slots.json',[]))
+    try:
+        fetch=subprocess.run(['curl','-4','-fsSL','--connect-timeout','8','--max-time','40','--retry','1',
+             'https://www.vpngate.net/api/iphone/','-o',str(work/'snapshot.csv')],
+             capture_output=True,text=True,timeout=90)
+        if fetch.returncode: raise RuntimeError('fresh VPN Gate snapshot download failed')
+        with (work/'progress.log').open('w') as output:
+            child=subprocess.Popen(['/usr/local/libexec/fanout/scan-jp','--csv',str(work/'snapshot.csv'),
+                  '--output',str(work),'--region',config['region'],'--finalists',str(config['finalists'])],stdout=output,stderr=subprocess.STDOUT)
+            result=child.wait(timeout=3600)
+            child=None
+        if result: raise RuntimeError('isolated candidate scan failed; see '+str(work/'progress.log'))
+        ranking=read_json(work/'ranking.json',[])
+        if len(ranking)<2: raise RuntimeError('fewer than two candidates passed repeated throughput and exit-IP tests')
+        api=API()
+        try: api.call('/api/refresh',method='POST')
+        except Exception: log('fanout node-list refresh failed; trying the existing list')
+        original=api.active(api.view())
+        for candidate in ranking:
+            try: row=ensure_candidate(api,candidate,created)
+            except Exception as error:
+                log('candidate connection failed: '+candidate['host']+' '+str(error)); continue
+            if row and all(r['host']!=row['host'] and r['exit_ip']!=row['exit_ip'] for r in selected):
+                selected.append(row)
+                if len(selected)==2: break
+        if len(selected)<2: raise RuntimeError('could not establish two distinct measured candidates; retaining previous pair')
+        primary,backup=selected
+        # Refresh the original immediately before applying, because HA may have switched during the scan.
+        original=api.active(api.view()) or original
+        if not request_switch(primary):
+            if original: request_switch(original)
+            raise RuntimeError('new primary failed CF end-to-end validation; rollback requested')
+        checks=[throughput(config) for _ in range(2)]
+        if any(v is None for v in checks):
+            if original: request_switch(original)
+            raise RuntimeError('new primary throughput verification unavailable; rollback requested')
+        actual=sum(checks)/len(checks)
+        if baseline is not None and actual < baseline*config['minimum_gain_ratio'] and primary['host']!=(original or {}).get('host'):
+            if original: request_switch(original)
+            raise RuntimeError('new CF path failed the minimum improvement margin; rollback requested')
+        latest=api.view()
+        active=api.active(latest)
+        backup_live=next((r for r in latest['exits'] if r['slot']==backup['slot'] and r['host']==backup['host'] and r['status']=='up'),None)
+        if not active or active['host']!=primary['host'] or not backup_live or not exit_valid(backup_live):
+            raise RuntimeError('pair changed during final validation; old exits retained')
+        protected={primary['slot'],backup['slot']}
+        retained=set(protected)
+        for slot in old_managed|created:
+            if slot not in protected and not api.stop_unused(slot,protected): retained.add(slot)
+        write_json(ROOT/'managed-slots.json',sorted(retained))
+        write_json(ROOT/'selection.json',dict(time=time.time(),primary={k:primary[k] for k in ('slot','host','exit_ip')},
+                   backup={k:backup[k] for k in ('slot','host','exit_ip')},cf_bps=actual,ranking=ranking))
+        state.update(phase='monitoring',last_scan_result='applied',active_host=primary['host'],
+                     primary_ip=primary['exit_ip'],backup_ip=backup['exit_ip'],verified_cf_mbps=actual*8/1000000)
+        state.pop('last_error',None)
+        log('pair applied: primary='+primary['exit_ip']+' backup='+backup['exit_ip']+' CF_Mbps='+str(round(actual*8/1000000,2)))
+    except Exception as error:
+        state.update(phase='monitoring',last_scan_result='failed',last_error=str(error))
+        log('scan did not replace the managed pair: '+str(error))
+        try:
+            api=API()
+            pending=set(old_managed)
+            for slot in created:
+                if not api.stop_unused(slot,old_managed): pending.add(slot)
+            write_json(ROOT/'managed-slots.json',sorted(pending))
+        except Exception as cleanup_error: log('candidate cleanup pending: '+str(cleanup_error))
+    finally:
+        if child is not None:
+            child.terminate()
+            try: child.wait(timeout=20)
+            except subprocess.TimeoutExpired: child.kill(); child.wait()
+            child=None
+        state['last_scan_finished']=time.time()
+        write_json(ROOT/'state.json',state)
+        # Bound retained reports and embedded public VPN configurations to three runs.
+        runs=sorted((ROOT/'scans').glob('*'))
+        for old in runs[:-3]:
+            if old.is_dir(): shutil.rmtree(old)
+
+def tick(force_scan=False):
+    config=configuration()
+    state=read_json(ROOT/'state.json',{})
+    api=API(); active=api.active(api.view())
+    health=read_json(HA/'status.json',{})
+    if not active or active['status']!='up' or health.get('state')!='healthy':
+        state.update(phase='waiting_for_healthy_path',low_count=0,last_check=time.time())
+        write_json(ROOT/'state.json',state)
+        log('bandwidth sample skipped: health watchdog is recovering the path')
+        return
+    bps=throughput(config)
+    count=low_streak(state,active['host'],bps,config)
+    state.update(phase='monitoring',sample_host=active['host'],sample_ip=active['exit_ip'],
+                 low_count=count,last_check=time.time(),last_mbps=None if bps is None else bps*8/1000000,
+                 threshold_mbps=config['threshold_mbps'])
+    write_json(ROOT/'state.json',state)
+    log('CF sample Mbps='+str(state['last_mbps'])+' threshold='+str(config['threshold_mbps'])+' low_count='+str(count))
+    due=count>=config['consecutive_low'] and time.time()-state.get('last_scan_started',0)>=config['scan_cooldown_seconds']
+    if force_scan or due: scan_and_replace(config,state,bps)
+
+def main():
+    os.umask(0o077)
+    ROOT.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with open('/run/fanout-speed.lock','w') as lock:
+        try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError: raise SystemExit('fanout-speed is already running')
+        parser=argparse.ArgumentParser()
+        parser.add_argument('--once',action='store_true')
+        parser.add_argument('--scan-now',action='store_true')
+        args=parser.parse_args()
+        if args.once or args.scan_now:
+            tick(args.scan_now); return
+        log('bandwidth monitor started')
+        while True:
+            try: tick()
+            except Exception as error: log('monitor check failed: '+str(error))
+            time.sleep(configuration()['check_interval_seconds'])
+
+if __name__=='__main__':
+    def stopped(sig,frame): raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM,stopped)
+    try: main()
+    except KeyboardInterrupt: log('bandwidth monitor stopped')

@@ -1,0 +1,142 @@
+#!/bin/bash
+# Manage the existing two inbound bindings through fanout's API.
+set -uo pipefail
+umask 077
+DIR=/var/lib/fanout-ha
+mkdir -p "$DIR"
+REGION=$(jq -r '.region // "JP"' /etc/fanout-ha.json 2>/dev/null) || REGION=JP
+PRIMARY_TAG=$(jq -r '.primary_inbound_tag // "in-33003-ws"' /etc/fanout-ha.json 2>/dev/null) || PRIMARY_TAG=in-33003-ws
+mapfile -t INBOUND_TAGS < <(jq -r '.inbound_tags[]' /etc/fanout-ha.json 2>/dev/null)
+((${#INBOUND_TAGS[@]})) || INBOUND_TAGS=(in-33003-ws in-33002-ws)
+exec 9> /run/fanout-ha.lock
+flock -w 20 9 || { printf "%s\n" "Another fanout-ha instance holds the lock; no switch was performed." >&2; exit 75; }
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
+api() { curl -fsS --connect-timeout 2 --max-time 8 -b "$DIR/cookies" "$@"; }
+probe() {
+    local proxy=$1 auth=${2:-} result
+    local opts=()
+    [[ -z "$auth" ]] || opts=(-U "$auth")
+    result=$(curl -fsS --connect-timeout 3 --max-time 8 --proxy "$proxy" "${opts[@]}" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) || return 1
+    sed -n 's/^ip=//p' <<< "$result" | tr -d '\r'
+}
+probe_exit() {
+    local row=$1 ip
+    ip=$(probe "socks5h://127.0.0.1:$(jq -r .port <<< "$row")" "$(jq -r '.socks_user+":"+.socks_pass' <<< "$row")") || return 1
+    [[ "$ip" = "$(jq -r .exit_ip <<< "$row")" && -n "$ip" ]]
+}
+status_write() {
+    jq -n --arg state "$1" --arg slot "$2" --arg ip "$3" --arg time "$(date -Iseconds)" '{state:$state,active_slot:$slot,exit_ip:$ip,checked_at:$time}' > "$DIR/status.json.tmp"
+    mv "$DIR/status.json.tmp" "$DIR/status.json"
+}
+switch_to() {
+    local row=$1 host slot ip tag
+    host=$(jq -r .host <<< "$row")
+    slot=$(jq -r .slot <<< "$row")
+    ip=$(jq -r .exit_ip <<< "$row")
+    # Refuse a stale API 'up' status: test the candidate SOCKS exit first.
+    probe_exit "$row" || { log "candidate slot=$slot failed its live exit test"; return 1; }
+    for tag in "${INBOUND_TAGS[@]}"; do
+        api -X POST --get --data-urlencode "tag=$tag" --data-urlencode "host=$host" "$BASE/api/xui/bind" >/dev/null || return 1
+    done
+    printf '%s\n' "$slot" > "$DIR/active-slot"
+    log "switched both VLESS inbounds to slot=$slot host=$host expected_ip=$ip"
+    sleep 1
+    local got
+    got=$(probe socks5h://127.0.0.1:10809) || got=""
+    if [[ "$got" = "$ip" ]]; then
+        log "CF end-to-end verified exit_ip=$got"
+        status_write healthy "$slot" "$got"
+        return 0
+    fi
+    status_write awaiting_cf "$slot" "$ip"
+    log "binding applied; CF end-to-end verification pending"
+    return 1
+}
+FAILURES=0
+LAST_REPAIR=0
+LAST_REFILL=0
+LAST_NOTICE=""
+cycle() {
+    local bp pw view current row expected got candidate slot now healthy_origin
+    bp=$(cat /var/lib/fanout/basepath) || return
+    pw=$(cat /var/lib/fanout/password) || return
+    local management_port
+    management_port=$(jq -r .port /var/lib/fanout/settings.json) || return
+    BASE="http://127.0.0.1:$management_port/$bp"
+    curl -fsS --max-time 5 -c "$DIR/cookies" --data-urlencode "password=$pw" "$BASE/login" >/dev/null 2>&1 || { log 'fanout API login unavailable'; return; }
+    view=$(api "$BASE/api/exits") || { log 'fanout exits API unavailable'; return; }
+    jq -e '.exits | type=="array"' <<< "$view" >/dev/null || return
+    current=$(jq -r --arg tag "$PRIMARY_TAG" '.exits[] | select(any(.inbounds[]?; .tag==$tag)) | .slot' <<< "$view" | head -1)
+    [[ -n "$current" ]] || current=$(cat "$DIR/active-slot" 2>/dev/null || echo 1)
+    row=$(jq -c --argjson slot "$current" '.exits[]|select(.slot==$slot)' <<< "$view")
+    row=${row:-'{}'}
+    expected=$(jq -r '.exit_ip // ""' <<< "$row")
+    now=$(date +%s)
+    # The bandwidth controller requests switches here so health monitoring stays running.
+    if [[ -s "$DIR/switch-request.json" && "${1:-}" != force ]]; then
+        local request request_id request_slot request_host request_ip outcome
+        request=$(cat "$DIR/switch-request.json")
+        request_id=$(jq -er '.id | select(type=="string")' <<< "$request" 2>/dev/null) || request_id=invalid
+        request_slot=$(jq -er '.slot | select(type=="number" and .>0)' <<< "$request" 2>/dev/null) || request_slot=0
+        request_host=$(jq -r '.host // ""' <<< "$request" 2>/dev/null)
+        request_ip=$(jq -r '.ip // ""' <<< "$request" 2>/dev/null)
+        candidate=$(jq -c --argjson slot "$request_slot" --arg host "$request_host" --arg ip "$request_ip" --arg region "$REGION" '.exits[]|select(.slot==$slot and .host==$host and .exit_ip==$ip and .status=="up" and .region==$region)' <<< "$view")
+        outcome=failed
+        if [[ "$request_id" != invalid && -n "$candidate" ]] && switch_to "$candidate"; then outcome=applied; fi
+        jq -n --arg id "$request_id" --arg result "$outcome" '{id:$id,result:$result}' > "$DIR/switch-result.json.tmp"
+        rm -f "$DIR/switch-request.json"
+        mv "$DIR/switch-result.json.tmp" "$DIR/switch-result.json"
+        log "bandwidth controller request=$request_id result=$outcome"
+        return
+    fi
+    # A failed newly-created exit needs an explicit swap to enter persistent retries.
+    if (( now - LAST_REFILL >= 120 )); then
+        while read -r slot; do
+            [[ -n "$slot" ]] || continue
+            api -X POST "$BASE/api/swap?slot=$slot" >/dev/null && log "requested persistent recovery for failed slot=$slot"
+        done < <(jq -r --arg region "$REGION" '.exits[]|select(.status=="failed" and .region==$region)|.slot' <<< "$view")
+        LAST_REFILL=$now
+    fi
+    if [[ "${1:-}" = force ]]; then
+        candidate=$(jq -c --argjson slot "$2" --arg region "$REGION" '.exits[]|select(.slot==$slot and .status=="up" and .region==$region)' <<< "$view")
+        [[ -n "$candidate" ]] && switch_to "$candidate"
+        return
+    fi
+    got=$(probe socks5h://127.0.0.1:10809) || got=""
+    if [[ -n "$expected" && "$got" = "$expected" && "$(jq -r .status <<< "$row")" = up ]]; then
+        FAILURES=0
+        LAST_NOTICE=""
+        printf '%s\n' "$current" > "$DIR/active-slot"
+        status_write healthy "$current" "$got"
+        return
+    fi
+    ((FAILURES+=1))
+    status_write degraded "$current" "$got"
+    # A known-down tunnel can fail over immediately; ambiguous failures need two samples.
+    if [[ "$(jq -r .status <<< "$row")" = up ]] && ((FAILURES < 2)); then return; fi
+    if [[ "$row" != '{}' && -n "$expected" ]] && probe_exit "$row"; then
+        healthy_origin=$(probe socks5h://127.0.0.1:10810) || healthy_origin=""
+        if [[ "$healthy_origin" = "$expected" ]]; then
+            if [[ "$LAST_NOTICE" != cf ]]; then log 'CF path unavailable while local VLESS and residential exit work; preserving the active exit'; fi
+            LAST_NOTICE=cf
+            status_write cf_unavailable "$current" "$expected"
+            return
+        fi
+        if (( now - LAST_REPAIR >= 60 )); then
+            log 'exit works but local VLESS fails; reapplying active bindings'
+            switch_to "$row" || true
+            LAST_REPAIR=$now
+            return
+        fi
+    fi
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        if switch_to "$candidate"; then FAILURES=0; return; fi
+    done < <(jq -c --argjson current "$current" --arg region "$REGION" '.exits[]|select(.slot!=$current and .status=="up" and .region==$region)' <<< "$view")
+    if [[ "$LAST_NOTICE" != no_backup ]]; then log 'no verified healthy standby available; fanout continues automatic reconnection'; fi
+    LAST_NOTICE=no_backup
+}
+if [[ "${1:-}" = --switch-to && "${2:-}" =~ ^[0-9]+$ ]]; then cycle force "$2"; exit $?; fi
+if [[ "${1:-}" = --once ]]; then cycle; exit $?; fi
+log 'watchdog started: 10s interval; two ambiguous failures; no automatic failback'
+while true; do cycle || true; sleep 10; done

@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+name="fanout-probe"
+description="Loopback-only CF and origin VLESS health probes"
+command="/var/lib/fanout/bin/xray"
+command_args="run -config /var/lib/fanout-ha/probe.json"
+command_background=true
+pidfile="/run/fanout-probe.pid"
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
+output_log="/var/log/fanout-probe.log"
+error_log="/var/log/fanout-probe.log"
+depend() { need net fanout; }

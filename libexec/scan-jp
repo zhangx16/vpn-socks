@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Bounded sequential throughput tests in an isolated, temporary network namespace."""
+import argparse, base64, csv, io, ipaddress, json, os, signal, statistics, subprocess, time
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--csv', required=True)
+parser.add_argument('--output', required=True)
+parser.add_argument('--region', choices=['JP','KR'], default='JP')
+parser.add_argument('--finalists', type=int, default=6)
+args = parser.parse_args()
+ROOT = Path(args.output)
+os.umask(0o077)
+ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+NS, VETH, PEER = 'fo-speedtest', 'fospv0', 'fospv1'
+CIDR, GW, CLIENT = '10.98.250.0/30', '10.98.250.1', '10.98.250.2'
+proc = None
+
+def private_resolvers(text):
+    networks=[ipaddress.ip_network(n) for n in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')]
+    result=[]
+    for line in text.splitlines():
+        fields=line.split()
+        if len(fields)<2 or fields[0]!='nameserver': continue
+        try: address=ipaddress.ip_address(fields[1])
+        except ValueError: continue
+        if address.version==4 and any(address in n for n in networks): result.append(str(address))
+    return result
+
+def run(args, check=True, timeout=15):
+    return subprocess.run(args, capture_output=True, text=True, check=check, timeout=timeout)
+
+def inside(args, **kw):
+    return run(['nsenter', '--net=/run/netns/'+NS, '--'] + args, **kw)
+
+def cleanup():
+    global proc
+    if proc is not None:
+        proc.terminate()
+        try: proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill(); proc.wait(timeout=2)
+        proc = None
+    run(['ip', 'netns', 'del', NS], check=False)
+    run(['ip', 'link', 'del', VETH], check=False)
+    for table, chain, rule in [
+        ('nat', 'POSTROUTING', ['-s', CIDR, '-j', 'MASQUERADE']),
+        ('filter', 'FORWARD', ['-s', CIDR, '-j', 'ACCEPT']),
+        ('filter', 'FORWARD', ['-d', CIDR, '-j', 'ACCEPT']),
+    ]:
+        run(['iptables', '-w', '3', '-t', table, '-D', chain]+rule, check=False)
+
+def setup(node):
+    global proc
+    cleanup()
+    run(['ip', 'netns', 'add', NS])
+    run(['ip', 'link', 'add', VETH, 'type', 'veth', 'peer', 'name', PEER])
+    run(['ip', 'link', 'set', PEER, 'netns', NS])
+    run(['ip', 'addr', 'add', GW+'/30', 'dev', VETH])
+    run(['ip', 'link', 'set', VETH, 'up'])
+    inside(['ip', 'link', 'set', 'lo', 'up'])
+    inside(['ip', 'addr', 'add', CLIENT+'/30', 'dev', PEER])
+    inside(['ip', 'link', 'set', PEER, 'up'])
+    inside(['ip', 'route', 'add', 'default', 'via', GW])
+    for resolver in private_resolvers(Path('/etc/resolv.conf').read_text()):
+        inside(['ip','route','replace',resolver+'/32','via',GW])
+    run(['iptables', '-w', '3', '-t', 'nat', '-A', 'POSTROUTING', '-s', CIDR, '-j', 'MASQUERADE'])
+    for direction in ['-s', '-d']:
+        run(['iptables', '-w', '3', '-I', 'FORWARD', '1', direction, CIDR, '-j', 'ACCEPT'])
+    config = ROOT/'candidate.ovpn'
+    config.write_bytes(base64.b64decode(node['OpenVPN_ConfigData_Base64']))
+    os.chmod(config, 0o600)
+    auth = ROOT/'auth'
+    auth.write_text('vpn\nvpn\n'); os.chmod(auth, 0o600)
+    log = ROOT/(node['HostName']+'.openvpn.log')
+    log.write_text('')  # Do not mistake a previous connection's log for readiness.
+    proc = subprocess.Popen(['nsenter', '--net=/run/netns/'+NS, '--', 'openvpn',
+        '--config', str(config), '--auth-user-pass', str(auth), '--auth-nocache',
+        '--dev', 'tun0', '--connect-retry-max', '1', '--connect-timeout', '10',
+        '--data-ciphers', 'AES-128-CBC:AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305',
+        '--verb', '3', '--log', str(log)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic()+15
+    while time.monotonic()<deadline:
+        if proc.poll() is not None: return False
+        if log.exists() and 'Initialization Sequence Completed' in log.read_text(errors='replace'):
+            return True
+        time.sleep(.25)
+    return False
+
+def exit_ip():
+    for url in ['https://api.ipify.org', 'https://www.cloudflare.com/cdn-cgi/trace']:
+        r=inside(['curl', '-4', '-fsS', '--connect-timeout', '3', '--max-time', '5', url], check=False)
+        if r.returncode: continue
+        value = r.stdout.strip() if 'ipify' in url else next((l[3:] for l in r.stdout.splitlines() if l.startswith('ip=')), '')
+        try:
+            if ipaddress.ip_address(value).version==4: return value
+        except ValueError: pass
+    return ''
+
+def measure(byte_count=4000000):
+    r=inside(['curl', '-4', '-sS', '--connect-timeout', '3', '--max-time', '10',
+        '-o', '/dev/null', '-w', '%{http_code} %{size_download} %{speed_download} %{time_total}',
+        'https://speed.cloudflare.com/__down?bytes='+str(byte_count)], check=False)
+    fields=r.stdout.strip().split()
+    if len(fields)!=4: return {'bps':0, 'error':'no_metrics'}
+    code,size,bps,seconds=fields
+    valid=code=='200' and int(size)>=131072
+    return {'bps':float(bps) if valid else 0, 'bytes':int(size), 'seconds':float(seconds), 'http':code}
+
+def emit(row):
+    with (ROOT/'results.jsonl').open('a') as f: f.write(json.dumps(row)+'\n')
+    print(json.dumps(row), flush=True)
+
+def stopped(sig, frame): raise KeyboardInterrupt
+signal.signal(signal.SIGTERM, stopped)
+signal.signal(signal.SIGINT, stopped)
+
+try:
+    raw=Path(args.csv).read_text(errors='replace')
+    lines=raw.splitlines()
+    header=next(i for i,l in enumerate(lines) if l.startswith('#HostName,'))
+    lines[header]=lines[header][1:]
+    nodes=[n for n in csv.DictReader(io.StringIO('\n'.join(l for l in lines[header:] if l!='*')))
+        if n.get('CountryShort')==args.region and not n['HostName'].startswith('public-vpn-')
+        and not n['IP'].startswith('219.100.37.')]
+    nodes.sort(key=lambda n:float(n.get('Speed') or 0), reverse=True)
+    (ROOT/'candidates.json').write_text(json.dumps(nodes))
+    (ROOT/'results.jsonl').write_text('')
+    print(json.dumps({'phase':'start','candidates':len(nodes),'handshake_limit_s':15,'download_limit_s':10}),flush=True)
+    good=[]
+    if not nodes: raise RuntimeError('No eligible '+args.region+' residential candidates in fresh snapshot')
+    for i,node in enumerate(nodes,1):
+        print(json.dumps({'phase':'testing','index':i,'total':len(nodes),'host':node['HostName']}),flush=True)
+        row={'phase':'first_pass','index':i,'host':node['HostName'],'ip':node['IP']}
+        try: connected=setup(node)
+        except (subprocess.SubprocessError, OSError) as error:
+            row.update(bps=0,error=str(error)); emit(row); continue
+        if not connected:
+            row.update(bps=0,error='handshake_failed_or_15s_timeout'); emit(row); continue
+        ip=exit_ip()
+        if ip!=node['IP']:
+            row.update(bps=0,error='exit_ip_mismatch',observed_ip=ip); emit(row); continue
+        row.update(measure()); emit(row)
+        if row['bps']>0: good.append((row,node))
+    finalists=sorted(good,key=lambda pair:pair[0]['bps'],reverse=True)
+    ranked=[]
+    for initial,node in finalists:
+        if len(ranked)>=args.finalists: break
+        print(json.dumps({'phase':'retest','host':node['HostName']}),flush=True)
+        try: connected=setup(node)
+        except (subprocess.SubprocessError, OSError): continue
+        if not connected or exit_ip()!=node['IP']: continue
+        samples=[measure(8000000) for _ in range(2)]
+        speeds=[s['bps'] for s in samples]
+        row={'phase':'finalist','host':node['HostName'],'ip':node['IP'],
+             'bps':statistics.median(speeds),'samples':samples}
+        emit(row)
+        if min(speeds)>0: ranked.append(row)
+    ranked.sort(key=lambda r:r['bps'],reverse=True)
+    (ROOT/'ranking.json').write_text(json.dumps(ranked,indent=2))
+    print(json.dumps({'phase':'complete','tested':len(nodes),'reachable_with_speed':len(good),'ranking':ranked}),flush=True)
+finally:
+    cleanup()
