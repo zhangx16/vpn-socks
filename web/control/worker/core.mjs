@@ -24,7 +24,7 @@ export function client(token,fetcher=fetch){
  };
 }
 
-async function zoneFor(api,domain){
+export async function zoneFor(api,domain){
  const labels=domain.split('.');
  for(let i=0;i<labels.length-1;i++){const name=labels.slice(i).join('.'),zones=await api('/zones?name='+encodeURIComponent(name));const found=zones.find(z=>z.name===name);if(found)return found;}
  throw Error('Token 无法找到域名所属的 Zone，请检查 Zone Read 权限和资源范围');

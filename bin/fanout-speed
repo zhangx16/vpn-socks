@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Slow-link detection and transactional replacement of a managed fanout pair."""
 import argparse
+import re
 import fcntl
 import http.cookiejar
 import json
@@ -40,7 +41,7 @@ def write_json(path, data):
 def configuration():
     config = DEFAULTS | read_json(CONFIG, {})
     config['region']=read_json(HA_CONFIG,{}).get('region','JP')
-    if config['region'] not in ('JP','KR'): raise ValueError('region must be JP or KR')
+    if not re.fullmatch(r'[A-Z]{2}',config['region']): raise ValueError('region must be a two-letter country code')
     limits = dict(threshold_mbps=(0.1,10000), check_interval_seconds=(60,86400),
                   consecutive_low=(1,20), scan_cooldown_seconds=(600,86400),
                   sample_bytes=(1000000,8000000), sample_timeout_seconds=(5,60),

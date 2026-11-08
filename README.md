@@ -1,6 +1,6 @@
 # vpn-socks
 
-给 [byJoey/fanout](https://github.com/byJoey/fanout) 增加同地区出口热备、Cloudflare → VLESS 完整链路检测，以及低带宽触发的出口库自动优选。支持日本 `JP` 和韩国 `KR`，每台服务器只从选定国家的出口库选择主备。适用于已经配置好 VLESS WebSocket、Cloudflare 端口回源的 Alpine/OpenRC NAT 服务器。
+给 [byJoey/fanout](https://github.com/byJoey/fanout) 增加同地区出口热备、Cloudflare → VLESS 完整链路检测，以及低带宽触发的出口库自动优选。支持出口库实际提供的国家/地区，网页动态展示候选数量；每台服务器只从选定地区选择主备。适用于已经配置好 VLESS WebSocket、Cloudflare 端口回源的 Alpine/OpenRC 或 Debian/Ubuntu/systemd NAT 服务器。
 
 ## 默认策略
 
@@ -24,7 +24,7 @@
 
 ## 安装前准备
 
-- Alpine Linux / OpenRC、root，以及可用的 `/dev/net/tun`、network namespace、veth、iptables 转发。
+- Alpine/OpenRC 或 Debian/Ubuntu/systemd、root，以及可用的 `/dev/net/tun`、network namespace、veth、iptables 转发。
 - 按 [fanout 上游说明](https://github.com/byJoey/fanout#安装)安装 fanout，使用 **native Xray** 后端。Xray 路径为 `/var/lib/fanout/bin/xray`；管理端口从 `/var/lib/fanout/settings.json` 自动读取，建议仅本机监听。
 - 在 fanout 中创建 `33002` 的 VLESS WS 入站，以及 `33003` 的 VLESS WS TLS 入站。两者使用同一个日本出口；另创建一条没有绑定入站的日本备用出口。
 - 设置 CF 橙云域名、目的端口 **33003**，确保现有节点已经能经 CF 访问。源站若为自签证书，主机名使用 CF Full 模式；可信源站证书可以使用 Full (strict)。
@@ -163,4 +163,45 @@ cd web/control
 node --test scripts/test.mjs
 bash scripts/build.sh
 node scripts/validate-artifact.mjs
+```
+
+
+## SSH 网页自动部署
+
+控制页增加「SSH 自动部署」和「新增服务器」。选择实时出口地区，填写服务器 IPv4、SSH 端口、root 用户名及密码或私钥、节点域名、已映射的 TCP 回源端口和 WS 路径，然后提交任务。
+
+后台执行以下步骤：检查并固定 SSH 主机密钥、检查系统和 TUN、上传当前部署脚本、安装 fanout/Xray、创建或复用相同配置的入站、连接所选国家出口、启用守护、配置 CF DNS/回源/TLS，并验证完整代理出口 IP 和国家。完成后返回可复制的 VLESS 链接。不会覆盖不同配置的已有端口，不会切换到别的国家凑数。
+
+只有一条可用出口时允许部署，并显示无独立热备的提示。志愿者库的候选数不等于在线数；没有任何候选连通时任务会失败，不会伪造可用节点。
+
+- SSH 密码、私钥和任务 CF Token 只保留在执行中的内存里，不写任务数据库或日志。
+- 关闭网页不会终止任务；重新打开页面可以恢复该任务进度。
+- 执行器重启会将未完成任务标为中断，因为凭据没有持久化；需重新填写凭据提交。
+- 节点链接作为私有任务结果保存在执行器数据库，只有提交任务的账号可读取。
+- 目标 NAT 的公开节点端口必须已映射到同名内部 TCP 端口；面板不会替你修改上游 NAT 映射。
+
+现有真实 SSH 闭环已在 Alpine 服务器验证；Debian/Ubuntu 提供 systemd 安装路径，当前环境未做新实例实测。手动服务操作在 Debian/Ubuntu 上使用 `systemctl` 替代 `rc-service` / `rc-update`。
+
+### 执行器
+
+Sites Worker 不直接建立 SSH 连接，通过受认证的 HTTPS 执行器投递任务。执行器源码位于 `runner/`，当前安装器面向已有 fanout TLS 节点的 Alpine/OpenRC 主机。
+
+- Sites Secret：`RUNNER_URL`、`RUNNER_TOKEN`，以及 `CONTROL_HOSTS`（禁止被节点配置覆盖的控制台域名 JSON 数组）。
+- 执行器 `/etc/vpn-runner.json`：`auth_sha256`（随机 Token 的 SHA256）、`hostname`、`reserved_hosts`。只保存认证哈希，不保存明文执行器 Token。
+- 执行器依赖：Python 3、Paramiko、Node.js、Nginx、iptables。
+- 私有数据目录：`/var/lib/vpn-runner`，权限 0700；任务 SQLite 和 SSH known_hosts 仅 root 可读。
+- API：受 Bearer 认证保护的 `GET /regions`、`POST /jobs`、`GET /jobs/{id}`；任务额外按服务端注入的账号标识隔离。
+
+`runner/install.sh <执行器域名> <已有节点公开 TLS 端口>` 配置反代复用：公网节点端口通过一条专用 PREROUTING 规则转发至 Nginx 35012，按主机名分流节点和执行器；执行器仅监听 127.0.0.1:35013。既有节点转发回原来的 Xray 端口。该安装器的入站网卡默认为 eth0，部署至不同网卡的主机需调整。
+
+执行器域名需单独配置 CF 橙云 A、回源到上述公开端口、主机名级 Full TLS；对这个经过密钥认证的 API 域名单独关闭 Browser Integrity Check，避免机器请求被浏览器检查阻断。控制台域名与其他节点的设置保持独立。
+
+增加执行器测试：
+
+```sh
+# 已安装 Paramiko 后
+python3 -m unittest discover -s tests -v
+cd web/control
+bash scripts/build.sh
+node --test scripts/test.mjs scripts/test-bridge.mjs
 ```

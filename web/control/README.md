@@ -19,3 +19,17 @@ node scripts/validate-artifact.mjs
 The build embeds the HTML and API handlers into one Cloudflare Worker ES module at `dist/server/index.js`. Tokens remain in runtime secrets or transient task memory. Browser history contains task summaries only. CF API failures trigger best-effort rollback of completed writes; DNS propagation or handshake failure is reported as pending rather than falsely declaring the node verified.
 
 Publication uses the Sites source and artifact workflow. The Site remains private to its owner. Never commit `.env`, credentials, runtime reports or local live-test scripts.
+
+
+## SSH automation
+
+The country selector reads the authenticated runner's live VPN Gate catalog, including candidate counts and update status. SSH jobs run on a separate authenticated HTTPS executor, survive browser closure, and return a verified VLESS link. Supported target installers: Alpine/OpenRC and Debian/Ubuntu/systemd. Existing Alpine deployment has been tested end to end.
+
+Additional runtime secrets: `RUNNER_URL`, `RUNNER_TOKEN`, `CONTROL_HOSTS` (JSON array). The Worker hashes the trusted Sites identity into an opaque actor ID. The runner scopes task records to this actor, does not persist SSH credentials or per-job CF tokens, and marks in-flight work interrupted on executor restart.
+
+SSH task polling, resume, node-link copying, singleton-country warnings and per-step progress are included. The frontend never places SSH credentials in localStorage.
+
+```sh
+bash scripts/build.sh
+node --test scripts/test.mjs scripts/test-bridge.mjs
+```

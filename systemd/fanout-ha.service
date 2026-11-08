@@ -1,0 +1,14 @@
+[Unit]
+Description=fanout-ha
+After=network-online.target fanout.service fanout-probe.service
+Wants=network-online.target
+Requires=fanout.service fanout-probe.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/fanout-ha
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -16,3 +16,8 @@ cookies
 scans/
 results.jsonl
 ranking.json
+
+*.sqlite
+*.sqlite-*
+known_hosts
+runner-config.json

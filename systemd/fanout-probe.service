@@ -1,0 +1,14 @@
+[Unit]
+Description=fanout-probe
+After=network-online.target fanout.service
+Wants=network-online.target
+Requires=fanout.service
+
+[Service]
+Type=simple
+ExecStart=/var/lib/fanout/bin/xray run -config /var/lib/fanout-ha/probe.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

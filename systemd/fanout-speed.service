@@ -1,0 +1,14 @@
+[Unit]
+Description=fanout-speed
+After=network-online.target fanout.service fanout-probe.service fanout-ha.service
+Wants=network-online.target
+Requires=fanout.service fanout-probe.service fanout-ha.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/fanout-speed
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
