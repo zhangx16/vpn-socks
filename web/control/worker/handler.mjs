@@ -22,6 +22,10 @@ export default {async fetch(request,env,ctx){
    }catch(error){return json({error:error.message},503)}
   }
   if(request.method!=='POST')return json({error:'Method not allowed'},405);
+  if(url.pathname==='/api/regions/refresh'){
+   try{return json(await runner(env,'/regions/refresh',actor,'POST',{}))}
+   catch(error){return json({error:error.message},503)}
+  }
   if(Number(request.headers.get('Content-Length')||0)>65536)return json({error:'请求过大'},413);
   let input;try{const raw=await request.text();if(raw.length>65536)return json({error:'请求过大'},413);input=JSON.parse(raw);validateConfig(input);}catch(error){return json({error:error.message},400);}
   let protectedHosts=[url.hostname];try{protectedHosts.push(...JSON.parse(env.CONTROL_HOSTS||'[]'))}catch{}

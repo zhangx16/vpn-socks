@@ -14,6 +14,15 @@ test('region choices are forwarded from the live catalog',async()=>{
   const r=await app.fetch(new Request('https://console.example/api/regions',{headers}),env,ctx);assert.equal((await r.json()).regions.length,2);
  }finally{globalThis.fetch=original}
 });
+test('manual catalog refresh uses an authenticated POST and returns fetch time',async()=>{
+ const original=globalThis.fetch;try{
+  globalThis.fetch=async(url,options)=>{assert.equal(url,'https://runner.example.com/regions/refresh');assert.equal(options.method,'POST');assert.equal(options.headers.Authorization,'Bearer fake-runner-token');return Response.json({updated_at:123,stale:false,regions:[{code:'CA',count:1}]})};
+  const r=await app.fetch(new Request('https://console.example/api/regions/refresh',{method:'POST',headers,body:'{}'}),env,ctx);assert.equal(r.status,200);assert.equal((await r.json()).updated_at,123);
+ }finally{globalThis.fetch=original}
+});
+test('cross-site catalog refresh is blocked before contacting the runner',async()=>{
+ const r=await app.fetch(new Request('https://console.example/api/regions/refresh',{method:'POST',headers:{...headers,Origin:'https://other.example'},body:'{}'}),env,ctx);assert.equal(r.status,403);
+});
 test('deploy queues credentials but returns only a task ID',async()=>{
  const original=globalThis.fetch;try{
   globalThis.fetch=async(url,options)=>{

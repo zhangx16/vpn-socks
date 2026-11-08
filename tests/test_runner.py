@@ -24,6 +24,21 @@ class RunnerTests(unittest.TestCase):
   with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)):
    catalog=runner.regions()
   self.assertEqual(catalog['regions'],[{'code':'RO','name':'Romania','count':1}])
+ def test_force_refresh_bypasses_a_fresh_cache(self):
+  original={'updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
+  sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\nvpn2,8.8.4.4,CA,Canada\n*\n'
+  with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)) as fetch:
+   self.assertEqual(runner.regions()['regions'][0]['code'],'JP');fetch.assert_not_called()
+   updated=runner.regions(force=True);self.assertEqual(updated['regions'][0]['code'],'CA');fetch.assert_called_once()
+ def test_failed_manual_refresh_preserves_the_previous_catalog(self):
+  original={'updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
+  with patch.object(runner.subprocess,'run',return_value=Mock(returncode=28,stdout=b'')):
+   with self.assertRaises(ValueError):runner.regions(force=True)
+  self.assertEqual(runner.CATALOG,original)
+ def test_manual_refresh_endpoint_requires_authentication(self):
+  self.assertEqual(self.request('/regions/refresh',{},token='wrong')[0],401)
+  with patch.object(runner,'regions',return_value={'updated_at':123,'regions':[{'code':'RO','count':1}]}) as fetch:
+   status,catalog=self.request('/regions/refresh',{});self.assertEqual(status,200);fetch.assert_called_once_with(force=True)
  def test_private_and_control_hosts_are_rejected(self):
   self.assertEqual(self.request('/jobs',{**self.payload,'ip':'127.0.0.1'})[0],400)
   self.assertEqual(self.request('/jobs',{**self.payload,'domain':'runner.example.com'})[0],400)

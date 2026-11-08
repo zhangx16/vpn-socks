@@ -26,10 +26,10 @@ def init():
 def event(job,step,state,message):
     with db() as c:c.execute('INSERT INTO events(job,time,step,state,message) VALUES(?,?,?,?,?)',(job,time.time(),step,state,str(message)[:2000]))
 
-def regions():
+def regions(force=False):
     global CATALOG
     with LOCK:
-        if CATALOG and time.time()-CATALOG['updated_at']<600:return CATALOG
+        if not force and CATALOG and time.time()-CATALOG['updated_at']<600:return CATALOG
         try:
             response=subprocess.run(['curl','-4','-fsSL','--connect-timeout','5','--max-time','20','https://www.vpngate.net/api/iphone/'],capture_output=True,timeout=25)
             if response.returncode:raise ValueError('catalog fetch failed')
@@ -45,6 +45,7 @@ def regions():
             CATALOG={'updated_at':time.time(),'stale':False,'regions':sorted(counts.values(),key=lambda r:(-r['count'],r['code']))}
             (ROOT/'catalog.json').write_text(json.dumps(CATALOG));return CATALOG
         except Exception:
+            if force:raise ValueError('获取最新出口列表失败，原候选列表未被替换，请稍后重试') from None
             previous=CATALOG
             if not previous and (ROOT/'catalog.json').exists():previous=json.loads((ROOT/'catalog.json').read_text())
             if previous and time.time()-previous['updated_at']<86400:return {**previous,'stale':True}
@@ -198,6 +199,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.authorized():return self.send(401,{'error':'Unauthorized'})
         actor=self.headers.get('X-Actor','')
         if not re.fullmatch('[a-zA-Z0-9_-]{1,120}',actor):return self.send(403,{'error':'Actor required'})
+        if self.path=='/regions/refresh':
+            try:return self.send(200,regions(force=True))
+            except Exception as error:return self.send(503,{'error':str(error)})
         if self.path!='/jobs':return self.send(404,{'error':'Not found'})
         try:
             length=int(self.headers.get('Content-Length','0'))

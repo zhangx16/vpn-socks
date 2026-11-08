@@ -33,3 +33,7 @@ SSH task polling, resume, node-link copying, singleton-country warnings and per-
 bash scripts/build.sh
 node --test scripts/test.mjs scripts/test-bridge.mjs
 ```
+
+## Catalog refresh
+
+The foreground page reloads the catalog every ten minutes and when it becomes visible. “获取最新候选” calls the owner-authenticated, same-origin POST `/api/regions/refresh`, which bypasses the executor's ten-minute cache. Successful results include the actual fetch timestamp and candidate counts. Failed forced refreshes preserve the previous catalog and report an error; listed candidates are not a guarantee of tunnel connectivity.
