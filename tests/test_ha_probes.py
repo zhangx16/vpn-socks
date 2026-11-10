@@ -9,3 +9,12 @@ class CountryProbeTests(unittest.TestCase):
  def test_matching_country_returns_actual_exit_ip(self):
   result=self.run_probe('JP','ip=8.8.4.4\nloc=JP\n');self.assertEqual(result.returncode,0);self.assertEqual(result.stdout.strip(),'8.8.4.4')
  def test_failed_network_request_is_not_healthy(self):self.assertNotEqual(self.run_probe('JP','',7).returncode,0)
+
+class OwnershipFilterTests(unittest.TestCase):
+ def test_renumbered_slot_cannot_steal_another_nodes_active_exit(self):
+  import json
+  function='filter_managed_view() {'+source.split('filter_managed_view() {',1)[1].split('\n}',1)[0]+'\n}\n'
+  view={'exits':[{'slot':1,'inbounds':[{'tag':'other'}]},{'slot':2,'inbounds':[]},{'slot':3,'inbounds':[{'tag':'own'}]},{'slot':4,'inbounds':[]}]}
+  code=function+'filter_managed_view "$MOCK_ALLOWED" "$MOCK_TAGS" <<< "$MOCK_VIEW"'
+  result=subprocess.run(['bash'],input=code,capture_output=True,text=True,env={**os.environ,'MOCK_VIEW':json.dumps(view),'MOCK_ALLOWED':'[1,2]','MOCK_TAGS':'["own"]'})
+  self.assertEqual(result.returncode,0,result.stderr);self.assertEqual([r['slot'] for r in json.loads(result.stdout)['exits']],[2,3])

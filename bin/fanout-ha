@@ -11,6 +11,7 @@ REGION=$(jq -r '.region // "JP"' "$HA_CONFIG" 2>/dev/null) || REGION=JP
 PRIMARY_TAG=$(jq -r '.primary_inbound_tag // "in-33003-ws"' "$HA_CONFIG" 2>/dev/null) || PRIMARY_TAG=in-33003-ws
 mapfile -t INBOUND_TAGS < <(jq -r '.inbound_tags[]' "$HA_CONFIG" 2>/dev/null)
 ((${#INBOUND_TAGS[@]})) || INBOUND_TAGS=(in-33003-ws in-33002-ws)
+INBOUND_TAGS_JSON=$(printf '%s\n' "${INBOUND_TAGS[@]}" | jq -Rsc 'split("\n")[:-1]')
 exec 9> "${FANOUT_HA_LOCK:-/run/fanout-ha.lock}"
 flock -w 20 9 || { printf "%s\n" "Another fanout-ha instance holds the lock; no switch was performed." >&2; exit 75; }
 log() { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
@@ -62,6 +63,12 @@ LAST_REPAIR=0
 LAST_REFILL=0
 LAST_REPLACE=0
 LAST_NOTICE=""
+filter_managed_view() {
+    jq --argjson allowed "$1" --argjson tags "$2" '.exits |= map(select(
+      all(.inbounds[]?; (.tag as $tag | $tags | index($tag)) != null)
+      and ((.slot as $s | $allowed | index($s)) != null or any(.inbounds[]?; (.tag as $tag | $tags | index($tag)) != null))
+    ))'
+}
 cycle() {
     local bp pw view current row expected got candidate slot now healthy_origin
     bp=$(cat /var/lib/fanout/basepath) || return
@@ -73,7 +80,7 @@ cycle() {
     view=$(api "$BASE/api/exits") || { log 'fanout exits API unavailable'; return; }
     if [[ -s ${FANOUT_SPEED_DIR:-/var/lib/fanout-speed}/managed-slots.json ]]; then
         allowed=$(cat "${FANOUT_SPEED_DIR:-/var/lib/fanout-speed}/managed-slots.json" 2>/dev/null) || allowed='[]'
-        view=$(jq --argjson allowed "$allowed" '.exits |= map(select(.slot as $s | $allowed | index($s)))' <<< "$view") || return
+        view=$(filter_managed_view "$allowed" "$INBOUND_TAGS_JSON" <<< "$view") || return
     fi
     jq -e '.exits | type=="array"' <<< "$view" >/dev/null || return
     current=$(jq -r --arg tag "$PRIMARY_TAG" '.exits[] | select(any(.inbounds[]?; .tag==$tag)) | .slot' <<< "$view" | head -1)
