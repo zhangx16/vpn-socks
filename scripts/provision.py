@@ -78,6 +78,7 @@ emit('monitor','done','后台守护和开机自启已配置')
 store=json.loads(Path('/var/lib/fanout/native.json').read_text())
 inbound=next(r for r in store['inbounds'] if r['port']==request['port']);client=next(c for c in inbound['clients'] if c['enable'])
 query=urllib.parse.urlencode({'encryption':'none','security':'tls','sni':request['domain'],'type':'ws','host':request['domain'],'path':request['path']})
-link='vless://'+client['id']+'@'+request['domain']+':443?'+query+'#'+region+'-CF'
+name=region+'-CF-'+request['path'].strip('/').replace('/','-')[:40]
+link='vless://'+client['id']+'@'+request['domain']+':443?'+query+'#'+urllib.parse.quote(name,safe='-')
 node={'link':link,'domain':request['domain'],'region':region,'exit_ip':active['exit_ip'],'standby_ips':[r['exit_ip'] for r in up if r['slot']!=active['slot']],'port':public_port,'listen_port':request['port'],'warning':None if len(up)>1 else '所选地区当前只有一条可用出口，暂无独立热备'}
 print(json.dumps({'kind':'node','data':node},ensure_ascii=False),flush=True)
