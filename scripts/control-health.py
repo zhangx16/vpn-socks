@@ -26,11 +26,12 @@ def trace(port):
   return dict(line.split('=',1) for line in p.stdout.splitlines() if '=' in line) if p.returncode==0 else {}
  except (OSError,subprocess.TimeoutExpired):return {}
 
-def manager_snapshot():
+def manager_snapshot(path='/api/exits',post=False):
  try:
   config=read('/var/lib/fanout/settings.json',{});base='http://127.0.0.1:'+str(config['port'])+'/'+Path('/var/lib/fanout/basepath').read_text().strip();opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
   with opener.open(base+'/login',urllib.parse.urlencode({'password':Path('/var/lib/fanout/password').read_text().strip()}).encode(),timeout=4) as response:json.load(response)
-  with opener.open(base+'/api/exits',timeout=4) as response:return json.load(response).get('exits')
+  with opener.open(urllib.request.Request(base+path,method='POST' if post else 'GET'),timeout=12) as response:
+   value=json.load(response);return value.get('exits') if path=='/api/exits' else value
  except Exception:return None
 
 def manager_ready():return isinstance(manager_snapshot(),list)
@@ -53,6 +54,10 @@ def main(request):
  store=read('/var/lib/fanout/native.json',{});native=store.get('inbounds',[]);configs=request['nodes'];valid=[r for r in configs if owned(r['config'],native)];results=[];actions=[]
  # Verify every requested identity before any shared-service operation.
  repair=request.get('repair',False) and len(valid)==len(configs) and bool(valid)
+ refresh=Path('/var/lib/fanout/control-health-refresh.json')
+ if len(valid)==len(configs) and valid and time.time()-read(refresh,{}).get('at',0)>(120 if repair else 600):
+  updated=manager_snapshot('/api/refresh',True)
+  if isinstance(updated,dict) and updated.get('count',0)>0:refresh.write_text(json.dumps({'at':time.time()}))
  if repair:
   if not service('fanout','status'):
    if service('fanout','start'):actions.append('start fanout')
