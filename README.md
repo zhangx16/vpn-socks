@@ -220,7 +220,7 @@ node --test scripts/test.mjs scripts/test-bridge.mjs
 
 本机 `fanout-pool` 服务只监听 `127.0.0.1:35014`，提供 `/catalog.csv` 和 `/status`。数据库和 CSV 位于 `/var/lib/fanout-pool`。网页执行器、fanout 的原生管理器、新服务器部署，以及自动优选统一使用聚合结果。
 
-fanout 上游没有可直接切换主 CSV URL 的参数，因此使用 `patches/fanout-catalog-source.patch` 的四行逻辑，新增 `FANOUT_VPNGATE_SOURCE` 环境变量。构建脚本固定上游版本 `d7ce5224caf3469b19876982abdf8d1be16c4a8b`，未设置环境变量时保持原来行为。`scripts/install-pool.sh` 安装聚合服务和配置，`scripts/build-fanout-pool.sh` 构建这个小补丁版本，需要 Go 1.24 或更新版本。升级上游二进制会覆盖此改动，需重新应用补丁。
+fanout 上游没有可直接切换主 CSV URL 的参数，因此使用 `patches/fanout-catalog-source.patch` 的四行逻辑，新增 `FANOUT_VPNGATE_SOURCE` 环境变量。构建脚本固定上游版本 `d7ce5224caf3469b19876982abdf8d1be16c4a8b`，未设置环境变量时保持原来行为。`scripts/install-pool.sh` 安装聚合服务和配置，`scripts/build-fanout-pool.sh` 构建这个小补丁版本，需要 Go 1.24 或更新版本；若本机工具链太旧，构建脚本会从 Go 官方下载固定版本并校验官方 SHA256，再使用受限并行度编译。升级上游二进制会覆盖此改动，需重新应用补丁。
 
 ```sh
 python3 /usr/local/libexec/fanout/catalog_pool.py --force

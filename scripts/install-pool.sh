@@ -4,9 +4,9 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p /usr/local/libexec/fanout
 for file in catalog_pool.py pool_server.py;do install -m 755 "$ROOT/libexec/$file" "/usr/local/libexec/fanout/$file";done
 if ! grep -aq FANOUT_VPNGATE_SOURCE /usr/local/bin/fanout;then
- if ! command -v go >/dev/null;then
-  if command -v apk >/dev/null;then apk add --no-cache go patch
-  else apt-get install -y -qq golang-go patch;fi
+ if ! command -v patch >/dev/null;then
+  if command -v apk >/dev/null;then apk add --no-cache patch
+  else apt-get install -y -qq patch;fi
  fi
  sh "$ROOT/scripts/build-fanout-pool.sh"
 fi
