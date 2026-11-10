@@ -1,6 +1,6 @@
 # 上游与依赖
 
-- [byJoey/fanout](https://github.com/byJoey/fanout)：MIT，Copyright (c) 2026 Joey (byJoey)。本项目通过其管理 API 操作出口和 native Xray 入站；命名空间、OpenVPN 参数和家宽筛选策略参考该项目。保留其 MIT 许可全文于 `licenses/fanout-MIT.txt`。
+- [byJoey/fanout](https://github.com/byJoey/fanout)：MIT，Copyright (c) 2026 Joey (byJoey)。本项目通过其管理 API 操作出口和 native Xray 入站；命名空间、OpenVPN 参数和家宽筛选策略参考该项目。构建时固定版本并应用出口库源和断流保护补丁（`patches/`），保留其 MIT 许可全文于 `licenses/fanout-MIT.txt`。
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core)：运行时依赖，由现有 fanout 安装提供，本仓库不分发其二进制。
 - [OpenVPN](https://github.com/OpenVPN/openvpn)：运行时依赖，由操作系统包管理器安装。
 - [VPN Gate](https://www.vpngate.net/)：公共志愿者 VPN 节点和列表来源。公共出口可用性、带宽及地址均会变化。

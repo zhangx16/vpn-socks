@@ -1,0 +1,105 @@
+--- a/native_xray.go
++++ b/native_xray.go
+@@ -99,13 +99,19 @@
+ 
+ 	rules := []any{}
+ 	for _, ib := range inbounds {
+-		if !ib.Enable || ib.BoundTo == "" || !live[ib.BoundTo] {
++		if !ib.Enable {
+ 			continue
++		}
++		target := "block"
++		if ib.BoundTo == "" {
++			target = "direct" // Preserve explicitly unbound upstream inbounds.
++		} else if live[ib.BoundTo] {
++			target = xuiTagPrefix + ib.BoundTo
+ 		}
+ 		rules = append(rules, map[string]any{
+ 			"type":        "field",
+ 			"inboundTag":  []any{ib.tag()},
+-			"outboundTag": xuiTagPrefix + ib.BoundTo,
++			"outboundTag": target,
+ 		})
+ 	}
+ 
+--- a/netns.go
++++ b/netns.go
+@@ -1,6 +1,9 @@
+ package main
+ 
+ import (
++	"fmt"
++	"syscall"
++	"time"
+ 	"net"
+ 	"os"
+ 	"runtime"
+@@ -42,7 +45,8 @@
+ 
+ 			// 隧道内只有 IPv4 路由。不限定的话 net.Dial 可能选中 AAAA 记录，
+ 			// 那条连接会绕开隧道从母机的 IPv6 出去，暴露真实地址。
+-			conn, dialErr := net.Dial(forceIPv4Network(network), addr)
++			dialer := vpnOnlyDialer("tun0")
++			conn, dialErr := dialer.Dial(forceIPv4Network(network), addr)
+ 
+ 			if err := unix.Setns(int(origin.Fd()), unix.CLONE_NEWNET); err != nil {
+ 				if conn != nil {
+@@ -71,3 +75,13 @@
+ 	}
+ 	return network
+ }
++
++// Pin application sockets to the VPN interface; a missing/down VPN must never use the host route.
++func vpnOnlyDialer(device string) net.Dialer {
++ return net.Dialer{Timeout: 15*time.Second, Control: func(network, address string, raw syscall.RawConn) error {
++  var bindErr error
++  if err := raw.Control(func(fd uintptr) { bindErr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, device) }); err != nil { return err }
++  if bindErr != nil { return fmt.Errorf("FANOUT_FAIL_CLOSED_V1: bind VPN interface: %w", bindErr) }
++  return nil
++ }}
++}
+--- /dev/null
++++ b/vpn_fail_closed_test.go
+@@ -0,0 +1,22 @@
++package main
++import ("net";"testing";"strings")
++func TestUnavailableBoundExitIsBlocked(t *testing.T) {
++ for _,status:=range []string{"starting","failed","stopped"} {
++  ib:=&nativeInbound{ID:1,Port:33001,Protocol:"vless",Network:"ws",Enable:true,BoundTo:"vpn-test"}
++  cfg:=buildXrayConfig([]*nativeInbound{ib},[]*Tunnel{{Status:status,Node:Node{HostName:"vpn-test"}}})
++  rules:=cfg["routing"].(map[string]any)["rules"].([]any)
++  if len(rules)!=1 || rules[0].(map[string]any)["outboundTag"]!="block" {t.Fatalf("%s must block: %v",status,rules)}
++ }
++}
++func TestLiveBoundExitKeepsItsRoute(t *testing.T) {
++ ib:=&nativeInbound{ID:1,Port:33001,Protocol:"vless",Network:"ws",Enable:true,BoundTo:"vpn-test"}
++ cfg:=buildXrayConfig([]*nativeInbound{ib},[]*Tunnel{{Status:"up",Node:Node{HostName:"vpn-test"}}})
++ rule:=cfg["routing"].(map[string]any)["rules"].([]any)[0].(map[string]any)
++ if rule["outboundTag"]!=xuiTagPrefix+"vpn-test" {t.Fatal(rule)}
++}
++func TestMissingVPNInterfaceCannotFallBackToLoopback(t *testing.T) {
++ listener,err:=net.Listen("tcp4","127.0.0.1:0");if err!=nil {t.Fatal(err)};defer listener.Close()
++ dialer:=vpnOnlyDialer("fo-no-such-vpn");conn,err:=dialer.Dial("tcp4",listener.Addr().String())
++ if conn!=nil {conn.Close();t.Fatal("VPN-less socket unexpectedly connected")}
++ if err==nil || !strings.Contains(err.Error(),"FANOUT_FAIL_CLOSED_V1") {t.Fatalf("missing interface was not blocked: %v",err)}
++}
+--- a/native_test.go
++++ b/native_test.go
+@@ -45,12 +45,15 @@
+ 	}
+ 
+ 	rules := cfg["routing"].(map[string]any)["rules"].([]any)
+-	if len(rules) != 1 {
+-		t.Fatalf("只有绑到连通隧道的入站才该有规则，实际 %d 条", len(rules))
++	if len(rules) != 3 {
++		t.Fatalf("每个启用入站都应有显式路由，实际 %d 条", len(rules))
+ 	}
+ 	if got := rules[0].(map[string]any)["outboundTag"]; got != "fanout-jp1" {
+ 		t.Errorf("outboundTag = %v, want fanout-jp1", got)
+ 	}
++	if got := rules[1].(map[string]any)["outboundTag"]; got != "block" { t.Fatalf("失效出口必须阻断: %v", got) }
++	if got := rules[2].(map[string]any)["outboundTag"]; got != "direct" { t.Fatalf("显式未绑定的上游入站保留原行为: %v", got) }
++
+ }
+ 
+ func TestBuildXrayConfigForcesIPv4OnDirect(t *testing.T) {

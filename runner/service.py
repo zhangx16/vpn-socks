@@ -165,7 +165,7 @@ def job_worker(job,data):
                 if item.get('kind')=='node':result.append(item['data'])
                 elif item.get('step'):event(job,item['step'],item.get('state','running'),item.get('message',''))
             except (ValueError,TypeError):pass
-        ready,_=ssh_run(client,'test -x /usr/local/bin/fanout && test -x /var/lib/fanout/bin/xray && test -s /var/lib/fanout/native.json && test -s /var/lib/fanout-pool/pool.json && test -f /usr/local/libexec/fanout/catalog_pool.py && command -v nginx && command -v python3 && command -v jq && command -v curl && command -v bash',timeout=15)
+        ready,_=ssh_run(client,'test -x /usr/local/bin/fanout && grep -aq FANOUT_FAIL_CLOSED_V1 /usr/local/bin/fanout && test -x /var/lib/fanout/bin/xray && test -s /var/lib/fanout/native.json && test -s /var/lib/fanout-pool/pool.json && test -f /usr/local/libexec/fanout/catalog_pool.py && command -v nginx && command -v python3 && command -v jq && command -v curl && command -v bash',timeout=15)
         if data.get('quick') and ready==0:
             event(job,'install','done','复用已安装的 fanout / Xray、入口及出口库，跳过重复安装')
             command='python3 '+shlex.quote(remote+'/vpn-socks/scripts/provision.py')+' '+shlex.quote(remote+'/request.json')+' '+shlex.quote(remote+'/vpn-socks')

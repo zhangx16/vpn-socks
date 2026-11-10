@@ -29,6 +29,7 @@ PY
 fi
 cd "$BUILD/fanout-$REV"
 patch -p1 < "$ROOT/patches/fanout-catalog-source.patch"
+patch -p1 < "$ROOT/patches/fanout-fail-closed.patch"
 GOMAXPROCS=2 GOMEMLIMIT=128MiB CGO_ENABLED=0 "$GO_BIN" build -p 1 -trimpath -ldflags '-s -w' -o "$BUILD/fanout" .
 [ ! -f "$TARGET" ] || cp -p "$TARGET" "$TARGET.before-pool"
 install -m 755 "$BUILD/fanout" "$TARGET"
