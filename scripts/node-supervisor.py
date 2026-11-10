@@ -3,7 +3,7 @@ import json,os,signal,subprocess,sys,time
 from pathlib import Path
 port=int(sys.argv[1]);node=Path('/var/lib/fanout-nodes')/str(port);cfg=json.loads((node/'node.json').read_text());children={}
 env={**os.environ,'FANOUT_NODE_MODE':'1','FANOUT_HA_DIR':str(node/'ha'),'FANOUT_SPEED_DIR':str(node/'speed'),'FANOUT_HA_CONFIG':str(node/'ha.json'),'FANOUT_HA_LOCK':str(node/'ha.lock'),'FANOUT_SPEED_LOCK':str(node/'speed.lock'),'FANOUT_CF_PROXY':'socks5h://127.0.0.1:'+str(cfg['cf_port']),'FANOUT_ORIGIN_PROXY':'socks5h://127.0.0.1:'+str(cfg['origin_port'])}
-commands={'probe':['/var/lib/fanout/bin/xray','run','-config',str(node/'ha/probe.json')],'ha':['/usr/local/sbin/fanout-ha'],'speed':['/usr/local/sbin/fanout-speed']}
+commands={'ha':['/usr/local/sbin/fanout-ha'],'speed':['/usr/local/sbin/fanout-speed']}
 def stopped(*args):raise KeyboardInterrupt
 signal.signal(signal.SIGTERM,stopped);signal.signal(signal.SIGINT,stopped)
 try:

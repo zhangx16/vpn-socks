@@ -25,7 +25,7 @@ env={**os.environ,'FANOUT_NODE_MODE':'1','FANOUT_HA_DIR':str(node/'ha'),'FANOUT_
 subprocess.run(['python3',str(project/'scripts/configure-probes.py'),'--domain',domain,'--region',region,'--port',str(port),'--allow-single'],env=env,check=True)
 subprocess.run(['/var/lib/fanout/bin/xray','run','-test','-config',str(node/'ha/probe.json')],check=True)
 Path('/usr/local/libexec/fanout').mkdir(parents=True,exist_ok=True)
-for source,target in [(project/'bin/fanout-ha',Path('/usr/local/sbin/fanout-ha')),(project/'bin/fanout-speed',Path('/usr/local/sbin/fanout-speed'))]+[(project/'libexec'/f,Path('/usr/local/libexec/fanout')/f) for f in ('scan-jp','catalog_pool.py','pool_server.py')]+[(project/'scripts/node-supervisor.py',Path('/usr/local/libexec/fanout/node-supervisor.py'))]:
+for source,target in [(project/'bin/fanout-ha',Path('/usr/local/sbin/fanout-ha')),(project/'bin/fanout-speed',Path('/usr/local/sbin/fanout-speed'))]+[(project/'libexec'/f,Path('/usr/local/libexec/fanout')/f) for f in ('scan-jp','catalog_pool.py','pool_server.py')]+[(project/'scripts'/f,Path('/usr/local/libexec/fanout')/f) for f in ('node-supervisor.py','shared-probe.py')]:
  shutil.copy2(source,target);target.chmod(0o755)
 # Migrate an old monitor only when it targets this same inbound.
 legacy=Path('/etc/fanout-ha.json');openrc=shutil.which('rc-service');service='fanout-node-'+str(port)
@@ -34,6 +34,7 @@ if legacy.exists() and json.loads(legacy.read_text()).get('primary_inbound_tag')
   subprocess.run(['rc-service',name,'stop'] if openrc else ['systemctl','disable','--now',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
   if openrc:subprocess.run(['rc-update','del',name,'default'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 (node/'disabled').unlink(missing_ok=True)
+(node/'enabled').touch(mode=0o600)
 if openrc:
  target=Path('/etc/init.d')/service
  target.write_text('#!/sbin/openrc-run\ncommand="/usr/bin/python3"\ncommand_args="/usr/local/libexec/fanout/node-supervisor.py '+str(port)+'"\ncommand_background=true\npidfile="/run/'+service+'.pid"\nsupervisor=supervise-daemon\nrespawn_delay=5\nrespawn_max=0\noutput_log="/var/log/'+service+'.log"\nerror_log="/var/log/'+service+'.log"\ndepend() { need net fanout; }\n');target.chmod(0o755)
@@ -42,3 +43,9 @@ else:
  target=Path('/etc/systemd/system')/(service+'.service');target.write_text('[Unit]\nAfter=network-online.target fanout.service\nRequires=fanout.service\n[Service]\nExecStart=/usr/bin/python3 /usr/local/libexec/fanout/node-supervisor.py '+str(port)+'\nRestart=always\nRestartSec=5\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n')
  subprocess.run(['systemctl','daemon-reload'],check=True);subprocess.run(['systemctl','enable',service],check=True);subprocess.run(['systemctl','restart',service],check=True)
 print('Independent node monitors installed on loopback ports '+str(cfg['cf_port'])+'/'+str(cfg['origin_port']))
+
+if openrc:
+ shared=Path('/etc/init.d/fanout-shared-probe');shared.write_text('#!/sbin/openrc-run\ncommand="/usr/bin/python3"\ncommand_args="/usr/local/libexec/fanout/shared-probe.py"\ncommand_background=true\npidfile="/run/fanout-shared-probe.pid"\nsupervisor=supervise-daemon\nrespawn_delay=5\nrespawn_max=0\noutput_log="/var/log/fanout-shared-probe.log"\nerror_log="/var/log/fanout-shared-probe.log"\ndepend() { need net fanout; }\n');shared.chmod(0o755);subprocess.run(['rc-update','add','fanout-shared-probe','default'],check=True)
+ if subprocess.run(['rc-service','fanout-shared-probe','status'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:subprocess.run(['rc-service','fanout-shared-probe','start'],check=True)
+else:
+ Path('/etc/systemd/system/fanout-shared-probe.service').write_text('[Unit]\nAfter=network-online.target fanout.service\n[Service]\nExecStart=/usr/bin/python3 /usr/local/libexec/fanout/shared-probe.py\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\n');subprocess.run(['systemctl','daemon-reload'],check=True);subprocess.run(['systemctl','enable','--now','fanout-shared-probe'],check=True)

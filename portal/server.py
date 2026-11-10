@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Self-hosted administrator console. All credentials remain server-side or in RAM."""
+import sys
 import hashlib,hmac,http.cookies,http.server,json,os,secrets,sqlite3,subprocess,time,urllib.request,urllib.error,urllib.parse
 from pathlib import Path
 PROJECT=Path(os.environ.get('VPN_RUNNER_PROJECT',Path(__file__).resolve().parents[1]))
 ROOT=Path(os.environ.get('VPN_PORTAL_DIR','/var/lib/vpn-control'))
 CONFIG=Path(os.environ.get('VPN_PORTAL_CONFIG','/etc/vpn-control.json'))
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import vault
 COOKIE='__Host-vpn_session'
 
 def settings():return json.loads(CONFIG.read_text())
 def db():return sqlite3.connect(ROOT/'auth.sqlite',timeout=15)
 def init():
  os.umask(0o077);ROOT.mkdir(parents=True,exist_ok=True)
+ vault.cipher(ROOT)
+ with vault.connection(ROOT) as c:pass
  with db() as c:c.executescript('CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,expires REAL);CREATE TABLE IF NOT EXISTS attempts(ip TEXT PRIMARY KEY,count INTEGER,start REAL);')
 def password_hash(password,salt):return hashlib.pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(salt),600000).hex()
 def run_cf(data):
@@ -46,13 +51,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
    if path=='/login':return self.send(303,'','text/plain',{'Location':'/'})
    if path=='/':
     nonce=secrets.token_hex(16);return self.send(200,(PROJECT/'web/control/worker/page.html').read_text().replace('__NONCE__',nonce),'text/html; charset=utf-8',{'Content-Security-Policy':"default-src 'self'; script-src 'nonce-"+nonce+"'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"})
-   if path=='/api/config':return self.send(200,{'nodes':settings().get('nodes',[]),'hasToken':bool(settings().get('cf_token')),'runnerReady':True,'selfHosted':True})
+   if path=='/api/config':return self.send(200,{'nodes':settings().get('nodes',[]),'hasToken':bool(settings().get('cf_token')),'runnerReady':True,'selfHosted':True,'resetEpoch':settings().get('reset_epoch',0)})
    if path=='/api/regions':return self.send(200,runner('/regions'))
    if path=='/api/jobs':
     ident=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('id',[''])[0]
     import re
     if ident and not re.fullmatch('[a-f0-9]{32}',ident):raise ValueError('任务 ID 无效')
     return self.send(200,runner('/jobs/'+ident if ident else '/jobs'))
+   if path=='/api/servers':return self.send(200,{'servers':vault.list_servers(ROOT)})
    if path=='/api/nodes':return self.send(200,runner('/nodes'))
    return self.send(404,{'error':'Not found'})
   except Exception as e:return self.send(400,{'error':str(e)})
@@ -89,8 +95,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     cfg['password_salt']=secrets.token_hex(24);cfg['password_hash']=password_hash(new,cfg['password_salt']);temp=CONFIG.with_suffix('.tmp');temp.write_text(json.dumps(cfg));temp.chmod(0o600);temp.replace(CONFIG)
     with db() as c:c.execute('DELETE FROM sessions')
     return self.send(200,{'ok':True})
+   if path=='/api/servers/save':
+    identity=vault.save(ROOT,data);return self.send(200,{'id':identity,'saved':True})
+   if path=='/api/servers/delete':
+    vault.delete(ROOT,data.get('serverId',''));return self.send(200,{'deleted':True})
    if path=='/api/regions/refresh':return self.send(200,runner('/regions/refresh',{}))
    if path in ('/api/deploy','/api/delete','/api/discover','/api/exit-options','/api/switch'):
+    target=data
+    if path in ('/api/delete','/api/exit-options','/api/switch'):
+     node=next((n for n in runner('/nodes')['nodes'] if n['id']==data.get('nodeId')),None)
+     if not node:raise ValueError('节点不存在')
+     target=node['config']
+    data=vault.resolve(ROOT,data,target)
+    if data.get('saveSSH') and (data.get('password') or data.get('privateKey')):vault.save(ROOT,{**data,'ip':target['ip'],'sshPort':target['sshPort']})
     data['cfToken']=data.pop('token',None) or cfg.get('cf_token','')
     return self.send(202,runner({'/api/deploy':'/jobs','/api/delete':'/delete','/api/discover':'/discover','/api/exit-options':'/exit-options','/api/switch':'/switch'}[path],data))
    if path not in ('/api/task','/api/verify'):return self.send(404,{'error':'Not found'})

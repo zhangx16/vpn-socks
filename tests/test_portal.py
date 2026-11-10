@@ -34,3 +34,11 @@ class PortalTests(unittest.TestCase):
   self.login()
   with patch.object(portal,'runner',return_value={'jobs':[]}) as runner:
    self.assertEqual(self.request('/api/jobs')[0],200);runner.assert_called_once_with('/jobs')
+
+ def test_saved_ssh_reuse_and_remark_api_never_expose_credentials(self):
+  body={'ip':'8.8.4.4','sshPort':2222,'username':'root','password':'test-secret-ssh','remark':'东京备用'}
+  self.assertEqual(self.request('/api/servers/save',body)[0],401);self.login();self.assertEqual(self.request('/api/servers/save',body)[0],200)
+  code,raw,_=self.request('/api/servers');self.assertEqual(code,200);self.assertNotIn('test-secret-ssh',raw);self.assertIn('东京备用',raw)
+  with patch.object(portal,'runner',return_value={'id':'fake-job'}) as runner:
+   code,raw,_=self.request('/api/deploy',{'ip':'8.8.4.4','sshPort':2222,'domain':'node.example.com','region':'JP','port':35001,'path':'/node'})
+   self.assertEqual(code,202);self.assertEqual(runner.call_args.args[1]['password'],'test-secret-ssh');self.assertNotIn('test-secret-ssh',raw)
