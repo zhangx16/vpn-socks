@@ -122,14 +122,13 @@ try:
     header=next(i for i,l in enumerate(lines) if l.startswith('#HostName,'))
     lines[header]=lines[header][1:]
     nodes=[n for n in csv.DictReader(io.StringIO('\n'.join(l for l in lines[header:] if l!='*')))
-        if n.get('CountryShort')==args.region and not n['HostName'].startswith('public-vpn-')
-        and not n['IP'].startswith('219.100.37.')]
+        if n.get('CountryShort')==args.region]
     nodes.sort(key=lambda n:float(n.get('Speed') or 0), reverse=True)
     (ROOT/'candidates.json').write_text(json.dumps(nodes))
     (ROOT/'results.jsonl').write_text('')
     print(json.dumps({'phase':'start','candidates':len(nodes),'handshake_limit_s':15,'download_limit_s':10}),flush=True)
     good=[]
-    if not nodes: raise RuntimeError('No eligible '+args.region+' residential candidates in fresh snapshot')
+    if not nodes: raise RuntimeError('No eligible '+args.region+' candidates in fresh snapshot')
     for i,node in enumerate(nodes,1):
         print(json.dumps({'phase':'testing','index':i,'total':len(nodes),'host':node['HostName']}),flush=True)
         row={'phase':'first_pass','index':i,'host':node['HostName'],'ip':node['IP']}

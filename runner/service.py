@@ -29,7 +29,7 @@ def event(job,step,state,message):
 def regions(force=False):
     global CATALOG
     with LOCK:
-        if not force and CATALOG and time.time()-CATALOG['updated_at']<600:return CATALOG
+        if not force and CATALOG and CATALOG.get('scope')=='all' and time.time()-CATALOG['updated_at']<600:return CATALOG
         try:
             response=subprocess.run(['curl','-4','-fsSL','--connect-timeout','5','--max-time','20','https://www.vpngate.net/api/iphone/'],capture_output=True,timeout=25)
             if response.returncode:raise ValueError('catalog fetch failed')
@@ -38,17 +38,16 @@ def regions(force=False):
             counts={}
             for row in csv.DictReader(io.StringIO(text[start:])):
                 code=row.get('CountryShort') or ''
-                if not re.fullmatch('[A-Z]{2}',code) or row.get('HostName','').startswith('public-vpn-'):continue
-                if row.get('IP','').startswith('219.100.37.'):continue
+                if not re.fullmatch('[A-Z]{2}',code):continue
                 value=counts.setdefault(code,{'code':code,'name':row.get('CountryLong',code),'count':0});value['count']+=1
             if not counts:raise ValueError('empty catalog')
-            CATALOG={'updated_at':time.time(),'stale':False,'regions':sorted(counts.values(),key=lambda r:(-r['count'],r['code']))}
+            CATALOG={'scope':'all','updated_at':time.time(),'stale':False,'regions':sorted(counts.values(),key=lambda r:(-r['count'],r['code']))}
             (ROOT/'catalog.json').write_text(json.dumps(CATALOG));return CATALOG
         except Exception:
             if force:raise ValueError('获取最新出口列表失败，原候选列表未被替换，请稍后重试') from None
             previous=CATALOG
             if not previous and (ROOT/'catalog.json').exists():previous=json.loads((ROOT/'catalog.json').read_text())
-            if previous and time.time()-previous['updated_at']<86400:return {**previous,'stale':True}
+            if previous and previous.get('scope')=='all' and time.time()-previous['updated_at']<86400:return {**previous,'stale':True}
             raise ValueError('出口列表暂时不可用，请稍后刷新') from None
 
 def validate(data,require_secret=True):
@@ -207,7 +206,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=65536:raise ValueError('请求大小无效')
             data=validate(json.loads(self.rfile.read(length)))
-            if data['region'] not in {r['code'] for r in regions()['regions']}:raise ValueError('该国家当前没有家宽候选出口')
+            if data['region'] not in {r['code'] for r in regions()['regions']}:raise ValueError('该国家当前没有候选出口')
             with db() as c:
                 count=c.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
                 if count>=4:return self.send(429,{'error':'部署队列已满，请等待已有任务结束'})

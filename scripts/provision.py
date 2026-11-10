@@ -17,6 +17,7 @@ for attempt in range(60):
   break
  except Exception:time.sleep(2)
 else:raise SystemExit('fanout API did not become ready')
+with opener.open(urllib.request.Request(base+'/api/settings',data=json.dumps({'residential_only':False}).encode(),headers={'Content-Type':'application/json'},method='POST'),timeout=10) as response:json.load(response)
 view=api('/api/exits')
 if view.get('backend')!='native':raise SystemExit('Existing fanout backend is not native; refusing to change its mode')
 store=json.loads(Path('/var/lib/fanout/native.json').read_text()) if Path('/var/lib/fanout/native.json').exists() else {'inbounds':[]}

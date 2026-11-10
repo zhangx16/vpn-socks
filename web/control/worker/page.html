@@ -4,7 +4,7 @@
 <div class="intro"><div><div class="eyebrow">CLOUDFLARE AUTOMATION</div><h1>让配置成为一项任务。</h1><p>为节点自动配置 DNS、端口回源与 TLS，完成后立即验收。</p></div><div class="healthy"><i class="dot"></i>后台处理 · 凭据不落浏览器存储</div></div>
 <div class="cards" id="nodes"><div class="node"><strong>正在连接任务后台…</strong></div></div><div class="workspace">
 <section class="panel"><div class="panelhead">节点配置 <span id="connection">连接中</span></div><div class="modes"><button type="button" id="modeCF" class="active">CF 配置</button><button type="button" id="modeDeploy">SSH 自动部署</button><button type="button" id="newServer">新增服务器 ＋</button></div><form class="content" id="form">
-<div class="row"><div class="field"><label for="region">出口地区</label><select id="region"><option value="">加载实际出口地区…</option></select><div class="catalog" id="catalogHint" aria-live="polite">正在读取公开出口库</div><button type="button" class="button" id="refreshRegions" style="margin-top:9px;padding:7px 10px;font-size:11px">↻ 获取最新候选</button></div><div class="field"><label for="ssl">源站 TLS 模式</label><select id="ssl"><option value="full">Full · 自签源站证书</option><option value="strict">Full (strict) · 可信证书</option></select></div></div>
+<div class="row"><div class="field"><label for="region">出口地区</label><select id="region"><option value="">加载实际出口地区…</option></select><div class="catalog" id="catalogHint" aria-live="polite">正在读取全部公开出口库</div><button type="button" class="button" id="refreshRegions" style="margin-top:9px;padding:7px 10px;font-size:11px">↻ 获取最新候选</button></div><div class="field"><label for="ssl">源站 TLS 模式</label><select id="ssl"><option value="full">Full · 自签源站证书</option><option value="strict">Full (strict) · 可信证书</option></select></div></div>
 <div class="field"><label for="domain">节点域名</label><input id="domain" required placeholder="node.example.com" autocomplete="off" spellcheck="false"></div>
 <div class="row"><div class="field"><label for="ip">服务器 IPv4</label><input id="ip" required placeholder="服务器公网 IP" autocomplete="off" spellcheck="false"></div><div class="field"><label for="port">回源端口</label><input id="port" required type="number" min="1" max="65535" value="33003"></div></div>
 <div class="field"><label for="path">WebSocket 路径</label><input id="path" required value="/" autocomplete="off" spellcheck="false"><div class="hint">客户端连接域名的 443，Cloudflare 回源到上方端口。</div></div>
@@ -42,7 +42,7 @@ async function loadRegions(force=false){
   if(old&&!data.regions.some(r=>r.code===old)){const missing=document.createElement('option');missing.value=old;missing.textContent=names.of(old)+' · 当前无候选';missing.disabled=true;options.unshift(missing)}
   selector.replaceChildren(...options);if(old)selector.value=old;
   catalogReady=true;const total=data.regions.reduce((sum,r)=>sum+r.count,0),when=new Date(data.updated_at*1000).toLocaleString('zh-CN',{hour12:false});
-  $('catalogHint').textContent=data.regions.length+' 个地区 · '+total+' 个候选 · '+(data.stale?'旧缓存，获取失败':'获取于 '+when)+' · 候选不代表在线';
+  $('catalogHint').textContent=data.regions.length+' 个地区 · '+total+' 个候选（全部类型） · '+(data.stale?'旧缓存，获取失败':'获取于 '+when)+' · 候选不代表在线';
  }catch(error){if(!$('region').options.length||!catalogReady)catalogReady=false;$('catalogHint').textContent=error.message+(catalogReady?'；仍显示上次获取结果':'；可点击重试');}
  finally{catalogLoading=false;button.disabled=busy;button.textContent='↻ 获取最新候选';}
 }

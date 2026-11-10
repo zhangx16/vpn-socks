@@ -50,6 +50,7 @@ if not managed.exists():
     password=Path('/var/lib/fanout/password').read_text().strip()
     with opener.open(base+'/login',urllib.parse.urlencode({'password':password}).encode(),timeout=10) as response:
         json.load(response)
+    with opener.open(urllib.request.Request(base+'/api/settings',data=b'{"residential_only":false}',headers={'Content-Type':'application/json'},method='POST'),timeout=10) as response:json.load(response)
     with opener.open(base+'/api/exits',timeout=10) as response: exits=json.load(response)['exits']
     active=next((row for row in exits if any(i['tag']==tags[0] for i in row.get('inbounds') or [])),None)
     if not active or active['region']!=args.region: raise SystemExit('Bind the selected TLS inbound to a '+args.region+' exit in fanout first')

@@ -19,19 +19,25 @@ class RunnerTests(unittest.TestCase):
    with urllib.request.urlopen(req,timeout=5) as r:return r.status,json.load(r)
   except urllib.error.HTTPError as e:return e.code,json.load(e)
  def test_authentication_is_required(self):self.assertEqual(self.request('/health',token='wrong')[0],401)
- def test_catalog_ignores_footer_and_datacenter_candidates(self):
-  sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\nvpn1,8.8.4.4,RO,Romania\npublic-vpn-1,8.8.8.8,JP,Japan\n*\n'
+ def test_catalog_includes_self_hosted_and_datacenter_candidates(self):
+  sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\nvpn1,8.8.4.4,RO,Romania\npublic-vpn-1,8.8.8.8,JP,Japan\nvpn-owned,219.100.37.1,JP,Japan\n*\n'
   with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)):
    catalog=runner.regions()
-  self.assertEqual(catalog['regions'],[{'code':'RO','name':'Romania','count':1}])
+  self.assertEqual(catalog['regions'],[{'code':'JP','name':'Japan','count':2},{'code':'RO','name':'Romania','count':1}]);self.assertEqual(catalog['scope'],'all')
  def test_force_refresh_bypasses_a_fresh_cache(self):
-  original={'updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
+  original={'scope':'all','updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
   sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\nvpn2,8.8.4.4,CA,Canada\n*\n'
   with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)) as fetch:
    self.assertEqual(runner.regions()['regions'][0]['code'],'JP');fetch.assert_not_called()
    updated=runner.regions(force=True);self.assertEqual(updated['regions'][0]['code'],'CA');fetch.assert_called_once()
+ def test_previous_residential_cache_is_not_reused(self):
+  runner.CATALOG={'updated_at':runner.time.time(),'regions':[{'code':'RO','count':1}]}
+  sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\npublic-vpn-1,219.100.37.1,JP,Japan\n*\n'
+  with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)) as fetch:
+   catalog=runner.regions()
+  fetch.assert_called_once();self.assertEqual(catalog['scope'],'all');self.assertEqual(catalog['regions'][0]['code'],'JP')
  def test_failed_manual_refresh_preserves_the_previous_catalog(self):
-  original={'updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
+  original={'scope':'all','updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
   with patch.object(runner.subprocess,'run',return_value=Mock(returncode=28,stdout=b'')):
    with self.assertRaises(ValueError):runner.regions(force=True)
   self.assertEqual(runner.CATALOG,original)

@@ -117,7 +117,7 @@ cycle() {
     if [[ "$row" != '{}' && -n "$expected" ]] && probe_exit "$row"; then
         healthy_origin=$(probe socks5h://127.0.0.1:10810) || healthy_origin=""
         if [[ "$healthy_origin" = "$expected" ]]; then
-            if [[ "$LAST_NOTICE" != cf ]]; then log 'CF path unavailable while local VLESS and residential exit work; preserving the active exit'; fi
+            if [[ "$LAST_NOTICE" != cf ]]; then log 'CF path unavailable while local VLESS and VPN exit work; preserving the active exit'; fi
             LAST_NOTICE=cf
             status_write cf_unavailable "$current" "$expected"
             return

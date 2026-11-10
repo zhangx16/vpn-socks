@@ -25,7 +25,7 @@ for port in range(33011,33101):
   s=socket.socket();s.bind(('127.0.0.1',port));s.close();break
  except OSError:continue
 else:raise SystemExit('No free management port')
-open('/var/lib/fanout/settings.json','w').write(json.dumps({'port':port,'listen_addr':'127.0.0.1','residential_only':True}))
+open('/var/lib/fanout/settings.json','w').write(json.dumps({'port':port,'listen_addr':'127.0.0.1','residential_only':False}))
 PY
 fi
 if [ ! -x /usr/local/bin/fanout ] || [ ! -x /var/lib/fanout/bin/xray ]; then
