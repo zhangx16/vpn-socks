@@ -66,5 +66,7 @@ LOG_FILE="$JOB/pool-install.log"
 sh "$JOB/vpn-socks/scripts/install-pool.sh" > "$JOB/pool-install.log" 2>&1
 if command -v rc-service >/dev/null;then rc-service fanout restart >> "$JOB/pool-install.log" 2>&1
 else systemctl restart fanout;fi
+PHASE='配置节点与守护'
+LOG_FILE="$JOB/overlay-install.log"
 python3 "$JOB/vpn-socks/scripts/provision.py" "$JOB/request.json" "$JOB/vpn-socks"
 trap - EXIT

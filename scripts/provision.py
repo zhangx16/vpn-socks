@@ -73,7 +73,9 @@ subprocess.run(['python3',str(project/'scripts/install-ingress.py'),json.dumps(r
 env={**os.environ,'ALLOW_SINGLE_EXIT':'1'}
 with open(Path(sys.argv[1]).parent/'overlay-install.log','w') as output:
  result=subprocess.run(['python3',str(project/'scripts/install-node.py'),request['domain'],region,str(request['port'])],env=env,stdout=output,stderr=subprocess.STDOUT)
-if result.returncode:raise SystemExit('Overlay service installation failed; see private overlay-install.log')
+if result.returncode:
+ detail='; '.join((Path(sys.argv[1]).parent/'overlay-install.log').read_text(errors='replace').splitlines()[-5:])
+ raise SystemExit('Overlay service installation failed: '+detail)
 emit('monitor','done','后台守护和开机自启已配置')
 store=json.loads(Path('/var/lib/fanout/native.json').read_text())
 inbound=next(r for r in store['inbounds'] if r['port']==request['port']);client=next(c for c in inbound['clients'] if c['enable'])

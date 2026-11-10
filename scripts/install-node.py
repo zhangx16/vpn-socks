@@ -26,7 +26,7 @@ subprocess.run(['python3',str(project/'scripts/configure-probes.py'),'--domain',
 subprocess.run(['/var/lib/fanout/bin/xray','run','-test','-config',str(node/'ha/probe.json')],check=True)
 Path('/usr/local/libexec/fanout').mkdir(parents=True,exist_ok=True)
 for source,target in [(project/'bin/fanout-ha',Path('/usr/local/sbin/fanout-ha')),(project/'bin/fanout-speed',Path('/usr/local/sbin/fanout-speed'))]+[(project/'libexec'/f,Path('/usr/local/libexec/fanout')/f) for f in ('scan-jp','catalog_pool.py','pool_server.py')]+[(project/'scripts'/f,Path('/usr/local/libexec/fanout')/f) for f in ('node-supervisor.py','shared-probe.py')]:
- shutil.copy2(source,target);target.chmod(0o755)
+ target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target);target.chmod(0o755)
 # Migrate an old monitor only when it targets this same inbound.
 legacy=Path('/etc/fanout-ha.json');openrc=shutil.which('rc-service');service='fanout-node-'+str(port)
 if legacy.exists() and json.loads(legacy.read_text()).get('primary_inbound_tag')=='in-'+str(port)+'-ws':
