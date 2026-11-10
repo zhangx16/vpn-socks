@@ -3,8 +3,18 @@ set -eu
 umask 077
 JOB=$1
 emit() { printf '{"step":"%s","state":"%s","message":"%s"}\n' "$1" "$2" "$3"; }
-trap 'emit install error "服务器安装步骤失败，私有安装日志保存在任务目录"' EXIT
+LOG_FILE="$JOB/packages.log"
+PHASE='检查系统依赖'
+failed() {
+ code=$?
+ [ "$code" -eq 0 ] && return
+ printf '{"step":"install","state":"error","message":"%s失败；退出码 %s，日志 %s"}\n' "$PHASE" "$code" "$(basename "$LOG_FILE")"
+ # Runner redacts credentials and selects a bounded tail before showing details.
+ if [ -s "$LOG_FILE" ];then grep -Ei 'error|failed|not found|unable|denied|错误|失败|cannot|禁止|严禁|No space|temporary failure' "$LOG_FILE" | tail -n 8 >&2 || true;fi
+}
+trap failed EXIT
 emit install running '检查系统依赖和网络命名空间'
+sh "$JOB/vpn-socks/scripts/preflight.sh"
 . /etc/os-release
 case "$ID" in
  alpine) apk add --no-cache bash curl jq python3 iproute2 iptables openvpn util-linux openssl unzip ca-certificates logrotate > "$JOB/packages.log" 2>&1 ;;
@@ -13,6 +23,7 @@ case "$ID" in
 esac
 test -c /dev/net/tun || { emit install error '服务器未开放 TUN 设备'; exit 1; }
 CHECK="vp_$(basename "$JOB" | cut -c1-8)"
+PHASE='创建网络命名空间'
 ip netns add "$CHECK"
 ip netns del "$CHECK"
 mkdir -p /var/lib/fanout
@@ -30,6 +41,8 @@ PY
 fi
 if [ ! -x /usr/local/bin/fanout ] || [ ! -x /var/lib/fanout/bin/xray ]; then
  emit install running '安装 fanout 和 Xray，安装日志不在网页回显'
+ PHASE='安装 fanout 和 Xray'
+ LOG_FILE="$JOB/fanout-install.log"
  curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/byJoey/fanout/main/install.sh -o "$JOB/fanout-install.sh"
  (cd "$JOB" && bash fanout-install.sh > "$JOB/fanout-install.log" 2>&1)
 fi
@@ -48,6 +61,8 @@ else
 fi
 emit install done 'fanout 与 Xray 已就绪'
 emit install running '汇总官方主站和镜像出口库'
+PHASE='初始化汇总出口池'
+LOG_FILE="$JOB/pool-install.log"
 sh "$JOB/vpn-socks/scripts/install-pool.sh" > "$JOB/pool-install.log" 2>&1
 if command -v rc-service >/dev/null;then rc-service fanout restart >> "$JOB/pool-install.log" 2>&1
 else systemctl restart fanout;fi

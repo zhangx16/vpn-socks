@@ -1,4 +1,4 @@
-import hashlib,importlib.util,json,sqlite3,tempfile,threading,unittest,urllib.request,urllib.error
+import hashlib,importlib.util,json,sqlite3,tempfile,threading,unittest,urllib.request,urllib.error,subprocess,os
 from pathlib import Path
 from unittest.mock import Mock,patch
 
@@ -28,6 +28,19 @@ class RunnerTests(unittest.TestCase):
    with urllib.request.urlopen(req,timeout=5) as r:return r.status,json.load(r)
   except urllib.error.HTTPError as e:return e.code,json.load(e)
  def test_authentication_is_required(self):self.assertEqual(self.request('/health',token='wrong')[0],401)
+ def test_deployment_error_returns_the_actual_cause_and_redacts_credentials(self):
+  output='{"step":"install","state":"error","message":"安装失败"}\nERROR: openvpn: failed to rename\npassword=secret-password token=secret-token\n'
+  message=runner.deployment_failure(output,{'password':'secret-password','cfToken':'secret-token'})
+  self.assertIn('failed to rename',message);self.assertNotIn('secret-password',message);self.assertNotIn('secret-token',message)
+ def test_preflight_rejects_an_operator_prohibition_before_package_install(self):
+  directory=Path(self.temporary.name)/'bin';directory.mkdir()
+  wrapper=directory/'openvpn';wrapper.write_text('#!/bin/sh\necho "当前节点严禁运行 OpenVPN"\nexit 1\n');wrapper.chmod(0o755)
+  script=Path(__file__).resolve().parents[1]/'scripts'/'preflight.sh'
+  result=subprocess.run(['sh',str(script)],env={**os.environ,'PATH':str(directory)+':'+os.environ['PATH']},capture_output=True,text=True)
+  self.assertEqual(result.returncode,42);self.assertIn('服务器预置策略明确禁止 OpenVPN',result.stderr)
+ def test_error_does_not_report_success_for_missing_node_result(self):
+  message=runner.deployment_failure('{"step":"install","state":"error","message":"依赖安装失败，退出码 1"}',{})
+  self.assertIn('依赖安装失败',message)
  def test_catalog_includes_self_hosted_and_datacenter_candidates(self):
   sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\nvpn1,8.8.4.4,RO,Romania\npublic-vpn-1,8.8.8.8,JP,Japan\nvpn-owned,219.100.37.1,JP,Japan\n*\n'
   with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)):

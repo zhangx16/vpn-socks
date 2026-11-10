@@ -103,6 +103,25 @@ def ssh_run(client,command,timeout=900,on_line=None):
         if on_line:on_line(buffer)
     return channel.recv_exit_status(),'\n'.join(output)
 
+def deployment_failure(output,data):
+    """Return a short actionable cause, stripping tokens, credentials and control bytes."""
+    events=[];plain=[]
+    for line in output.splitlines():
+        try:
+            parsed=json.loads(line)
+            if isinstance(parsed,dict) and parsed.get('state')=='error':events.append(str(parsed.get('message','')))
+        except (ValueError,TypeError):
+            if line.strip():plain.append(line.strip())
+    meaningful=[s for s in plain if '私有安装日志' not in s]
+    detail='；'.join(meaningful[-4:] or events[-1:] or ['部署脚本异常退出，未返回节点结果'])
+    for field in ('password','privateKey','cfToken'):
+        secret=data.get(field)
+        if secret:detail=detail.replace(secret,'[redacted]')
+    detail=re.sub(r'(https?://)[^/\s:@]+:[^/\s@]+@',r'\1[redacted]@',detail)
+    detail=re.sub(r'(?i)(password|token|secret)([=:]\s*)[^\s;&]+',r'\1\2[redacted]',detail)
+    detail=''.join(ch for ch in detail if ch>=' ')
+    return detail[:1600]
+
 def job_worker(job,data):
     client=None;package=ROOT/(job+'.tar.gz');node=None
     try:
@@ -136,8 +155,8 @@ def job_worker(job,data):
                 elif item.get('step'):event(job,item['step'],item.get('state','running'),item.get('message',''))
             except (ValueError,TypeError):pass
         command='sh '+shlex.quote(remote+'/vpn-socks/scripts/bootstrap.sh')+' '+shlex.quote(remote)
-        code,_=ssh_run(client,command,timeout=1000,on_line=progress)
-        if code or not result:raise ValueError('服务器部署未完成，请查看上方步骤；原有入站不会被自动删除')
+        code,output=ssh_run(client,command,timeout=1000,on_line=progress)
+        if code or not result:raise ValueError(deployment_failure(output,data))
         node=result[-1]
         event(job,'cloudflare','running','自动配置橙云 DNS、回源端口与域名 TLS')
         payload={**parameters,'token':data['cfToken'],'ssl':data.get('ssl','full')}
