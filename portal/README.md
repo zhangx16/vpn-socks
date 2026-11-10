@@ -42,3 +42,20 @@ systemctl status vpn-control vpn-runner
 ```
 
 备份 `/etc/vpn-control.json`、`/etc/vpn-runner.json`、`/var/lib/vpn-control/`、`/var/lib/vpn-runner/` 到私有位置。请勿提交真实配置、SSH 凭据、Cookie、节点订阅链接或状态数据库到 GitHub。
+
+
+## 自动测活与修复
+
+`vpn-watchdog` 在控制台服务器上常驻运行，每分钟按服务器合并检查：外部域名 WebSocket 握手、节点真实代理出口 IP / 国家、守护进程及心跳、入口和管理接口。网页显示最近状态和检查时间；超过三分钟未更新会标记记录过期。实际出口和已连接热备随验收结果更新。
+
+连续异常后执行有限修复，修复操作之间至少间隔 180 秒：拉起停止的 fanout / 共享探测进程，恢复 nginx 和本项目入口规则，重启失效的节点守护。管理接口持续不可用时可重启 fanout。节点本机守护逐轮检查出口国家、自动切换已验证热备；无可用热备且当前出口不可用时请求同地区新出口，并限制替换频率。
+
+测活与部署、手动切换共用服务器连接锁，避免自动修复打断用户任务。自动连接要求已登记的 SSH 主机密钥，自动修复前核对节点域名、路径、端口和 UUID。主机密钥或节点身份变化时需要人工确认。最近修复动作、失败计数和修复时间保存在节点详情中。
+
+整机停机或 NAT 映射失效需要服务商面板恢复连接；恢复后将自动验收并拉起本项目已有服务。首次使用需要保存 SSH 信息。
+
+```sh
+systemctl status vpn-watchdog
+# 单轮完整测活
+/opt/vpn-control/venv/bin/python runner/watchdog.py --once
+```

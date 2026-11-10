@@ -16,10 +16,12 @@ flock -w 20 9 || { printf "%s\n" "Another fanout-ha instance holds the lock; no 
 log() { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
 api() { curl -fsS --connect-timeout 2 --max-time 8 -b "$DIR/cookies" "$@"; }
 probe() {
-    local proxy=$1 auth=${2:-} result
+    local proxy=$1 auth=${2:-} result location
     local opts=()
     [[ -z "$auth" ]] || opts=(-U "$auth")
-    result=$(curl -fsS --connect-timeout 3 --max-time 8 --proxy "$proxy" "${opts[@]}" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) || return 1
+    result=$(curl -4 -fsS --connect-timeout 3 --max-time 8 --proxy "$proxy" "${opts[@]}" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) || return 1
+    location=$(sed -n 's/^loc=//p' <<< "$result" | tr -d '\r')
+    [[ "$location" = "$REGION" ]] || return 1
     sed -n 's/^ip=//p' <<< "$result" | tr -d '\r'
 }
 probe_exit() {
@@ -58,6 +60,7 @@ switch_to() {
 FAILURES=0
 LAST_REPAIR=0
 LAST_REFILL=0
+LAST_REPLACE=0
 LAST_NOTICE=""
 cycle() {
     local bp pw view current row expected got candidate slot now healthy_origin
@@ -140,6 +143,10 @@ cycle() {
         [[ -n "$candidate" ]] || continue
         if switch_to "$candidate"; then FAILURES=0; return; fi
     done < <(jq -c --argjson current "$current" --arg region "$REGION" '.exits[]|select(.slot!=$current and .status=="up" and .region==$region)' <<< "$view")
+    if [[ "$row" != '{}' ]] && (( now - LAST_REPLACE >= 120 )); then
+        api -X POST "$BASE/api/swap?slot=$current" >/dev/null && log "requested a new regional exit for unusable slot=$current"
+        LAST_REPLACE=$now
+    fi
     if [[ "$LAST_NOTICE" != no_backup ]]; then log 'no verified healthy standby available; fanout continues automatic reconnection'; fi
     LAST_NOTICE=no_backup
 }

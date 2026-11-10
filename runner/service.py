@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Authenticated HTTPS-adjacent SSH job runner. Passwords and CF tokens stay in RAM."""
+import fcntl
 import concurrent.futures, csv, hashlib, hmac, http.server, io, ipaddress, json, os, re
 import secrets, shlex, sqlite3, subprocess, tarfile, threading, time, urllib.parse, urllib.request
 import sys
@@ -25,7 +26,15 @@ def init():
     with db() as c:
         c.executescript('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,actor TEXT,status TEXT,created REAL,config TEXT,result TEXT,error TEXT); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,time REAL,step TEXT,state TEXT,message TEXT);')
         c.execute('CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY,actor TEXT,config TEXT,result TEXT,status TEXT,updated REAL)')
+        c.execute('CREATE TABLE IF NOT EXISTS node_health(id TEXT PRIMARY KEY,state TEXT,checked REAL,failures INTEGER,repaired REAL,detail TEXT)')
         c.execute("UPDATE jobs SET status='interrupted',error='执行器重启，凭据未持久化；请重新提交任务' WHERE status IN ('queued','running')")
+
+def server_lock(data,blocking=True):
+    directory=ROOT/'server-locks';directory.mkdir(mode=0o700,exist_ok=True)
+    identity=hashlib.sha256((data['ip']+':'+str(data['sshPort'])).encode()).hexdigest()
+    stream=(directory/identity).open('a')
+    try:fcntl.flock(stream,fcntl.LOCK_EX|(0 if blocking else fcntl.LOCK_NB));return stream
+    except BlockingIOError:stream.close();return None
 
 def event(job,step,state,message):
     with db() as c:c.execute('INSERT INTO events(job,time,step,state,message) VALUES(?,?,?,?,?)',(job,time.time(),step,state,str(message)[:2000]))
@@ -124,8 +133,9 @@ def deployment_failure(output,data):
     return detail[:1600]
 
 def job_worker(job,data):
-    client=None;package=ROOT/(job+'.tar.gz');node=None
+    client=None;package=ROOT/(job+'.tar.gz');node=None;lease=None
     try:
+        lease=server_lock(data)
         with db() as c:c.execute("UPDATE jobs SET status='running' WHERE id=?",(job,))
         event(job,'ssh','running','连接 SSH 并检查主机密钥')
         client=paramiko.SSHClient();known=ROOT/'known_hosts'
@@ -191,6 +201,7 @@ def job_worker(job,data):
         with db() as c:c.execute("UPDATE jobs SET status='failed',error=?,result=? WHERE id=?",(message,json.dumps(node) if node else None,job))
     finally:
         if client:client.close()
+        if lease:lease.close()
         package.unlink(missing_ok=True)
         for field in ('password','privateKey','cfToken'):data[field]=''
 
@@ -211,8 +222,9 @@ def connect(data):
     return client
 
 def node_worker(job,data):
-    client=None
+    client=None;lease=None
     try:
+        lease=server_lock(data)
         with db() as c:c.execute("UPDATE jobs SET status='running' WHERE id=?",(job,))
         event(job,'ssh','running','连接服务器并核对节点身份');client=connect(data)
         remote='/root/.vpn-socks-jobs/'+job
@@ -258,6 +270,7 @@ def node_worker(job,data):
         with db() as c:c.execute("UPDATE jobs SET status='failed',error=? WHERE id=?",(message,job))
     finally:
         if client:client.close()
+        if lease:lease.close()
         for key in ('password','privateKey','cfToken'):data[key]=''
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -279,7 +292,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with db() as c:
             if path=='/nodes':
                 rows=c.execute("SELECT * FROM nodes WHERE actor=? ORDER BY updated DESC",(actor,)).fetchall()
-                return self.send(200,{'nodes':[{**dict(r),'config':json.loads(r['config']),'result':json.loads(r['result'])} for r in rows]})
+                health={row['id']:{**dict(row),'detail':json.loads(row['detail']),'stale':time.time()-row['checked']>180} for row in c.execute('SELECT * FROM node_health')}
+                return self.send(200,{'nodes':[{**dict(r),'config':json.loads(r['config']),'result':json.loads(r['result']),'health':health.get(r['id'])} for r in rows]})
             if path=='/jobs':
                 rows=c.execute('SELECT id,status,created,config,result,error FROM jobs WHERE actor=? ORDER BY created DESC LIMIT 20',(actor,)).fetchall()
                 return self.send(200,{'jobs':[{**dict(r),'config':json.loads(r['config']),'result':json.loads(r['result']) if r['result'] else None} for r in rows]})
