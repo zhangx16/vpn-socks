@@ -1,6 +1,6 @@
 # 自托管管理员控制台与多出口节点
 
-当前推荐运行方式为服务器本地控制台，支持管理员账号密码登录、同服务器多出口、同域名不同 WS 路径节点，以及单节点删除。安装与操作见 [portal/README.md](portal/README.md)。`web/control/worker` 中保留了早期 Sites / Worker 适配器；自托管版本使用同目录页面和 Cloudflare 配置模块，HTTP 入口为 `portal/server.py`。
+当前推荐运行方式为服务器本地控制台，支持管理员账号密码登录、同服务器多出口、同域名不同 WS 路径节点，以及单节点删除、手动切换出口和失败回滚。安装与操作见 [portal/README.md](portal/README.md)。`web/control/worker` 中保留了早期 Sites / Worker 适配器；自托管版本使用同目录页面和 Cloudflare 配置模块，HTTP 入口为 `portal/server.py`。
 
 # vpn-socks
 

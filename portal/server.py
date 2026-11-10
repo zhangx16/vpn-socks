@@ -90,9 +90,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     with db() as c:c.execute('DELETE FROM sessions')
     return self.send(200,{'ok':True})
    if path=='/api/regions/refresh':return self.send(200,runner('/regions/refresh',{}))
-   if path in ('/api/deploy','/api/delete','/api/discover'):
+   if path in ('/api/deploy','/api/delete','/api/discover','/api/exit-options','/api/switch'):
     data['cfToken']=data.pop('token',None) or cfg.get('cf_token','')
-    return self.send(202,runner({'/api/deploy':'/jobs','/api/delete':'/delete','/api/discover':'/discover'}[path],data))
+    return self.send(202,runner({'/api/deploy':'/jobs','/api/delete':'/delete','/api/discover':'/discover','/api/exit-options':'/exit-options','/api/switch':'/switch'}[path],data))
    if path not in ('/api/task','/api/verify'):return self.send(404,{'error':'Not found'})
    if data.get('domain','').lower().rstrip('.') in [cfg['hostname'],*cfg.get('protected_hosts',[])]:raise ValueError('不能覆盖控制台或执行器域名')
    data['token']=data.get('token') or cfg.get('cf_token','');data['operation']='verify' if path=='/api/verify' else 'configure'

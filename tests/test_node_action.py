@@ -28,3 +28,20 @@ class NodeActionTests(unittest.TestCase):
  def test_absent_node_deletion_is_idempotent(self):
   with patch.object(action,'call_api',return_value=self.api):result=action.main({**self.request,'port':20555})
   self.assertTrue(result['already_absent'])
+
+ def switch_view(self):return {'exits':[{'slot':1,'host':'original','exit_ip':'8.8.8.8','region':'KR','status':'up','inbounds':[{'tag':'in-20001-ws'}]},{'slot':2,'host':'backup','exit_ip':'8.8.4.4','region':'KR','status':'up','inbounds':[]}]}
+ def test_manual_switch_changes_only_selected_tag_after_validation(self):
+  view=self.switch_view();calls=[]
+  def api(path,params=None,post=False):calls.append((path,params));return view if path=='/api/exits' else {'ok':True}
+  request={**self.request,'operation':'switch','region':'KR','targetHost':'backup','targetIP':'8.8.4.4'}
+  with patch.object(action,'actual_exit',return_value={'ip':'8.8.4.4','loc':'KR'}):result=action.switch_exit(api,view,{'inbounds':[self.first,self.other]},request)
+  self.assertEqual(result['exit_ip'],'8.8.4.4');self.assertEqual([p for path,p in calls if path=='/api/xui/bind'],[{'tag':'in-20001-ws','host':'backup'}])
+ def test_failed_full_chain_verification_rolls_back_binding(self):
+  view=self.switch_view();calls=[]
+  def api(path,params=None,post=False):calls.append((path,params));return view if path=='/api/exits' else {}
+  request={**self.request,'operation':'switch','region':'KR','targetHost':'backup','targetIP':'8.8.4.4'}
+  with patch.object(action,'actual_exit',return_value={'ip':'1.1.1.1','loc':'US'}),self.assertRaises(ValueError):action.switch_exit(api,view,{'inbounds':[self.first]},request)
+  self.assertEqual([p for path,p in calls if path=='/api/xui/bind'][-1],{'tag':'in-20001-ws','host':'original'})
+ def test_exit_owned_by_another_node_cannot_be_selected(self):
+  view=self.switch_view();view['exits'][1]['inbounds']=[{'tag':'in-20002-ws'}]
+  options=action.exit_options(view,{**self.request,'region':'KR'});self.assertFalse(next(r for r in options if r['host']=='backup')['available'])

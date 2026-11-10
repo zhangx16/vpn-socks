@@ -214,17 +214,22 @@ def node_worker(job,data):
         remote='/root/.vpn-socks-jobs/'+job
         code,_=ssh_run(client,'umask 077; mkdir -p '+shlex.quote(remote),timeout=15)
         if code:raise ValueError('无法创建任务目录')
-        operation=data['_operation'];parameters={k:data[k] for k in ('domain','port','path','uuid') if k in data};parameters['operation']=operation
-        if operation=='delete':parameters['port']=data.get('listenPort',data['port'])
+        operation=data['_operation'];parameters={k:data[k] for k in ('domain','port','path','uuid','region','targetHost','targetIP') if k in data};parameters['operation']=operation
+        if operation in ('delete','switch','exits'):parameters['port']=data.get('listenPort',data['port'])
         with client.open_sftp() as ftp:
             ftp.put(str(PROJECT/'scripts/node-action.py'),remote+'/action.py')
             with ftp.file(remote+'/request.json','w') as f:f.write(json.dumps(parameters))
             ftp.chmod(remote+'/request.json',0o600)
-        event(job,'inbound','running','读取服务器节点' if operation=='discover' else '删除指定入站与独立守护')
-        code,out=ssh_run(client,'python3 '+shlex.quote(remote+'/action.py')+' '+shlex.quote(remote+'/request.json'),timeout=100)
+        event(job,'inbound','running',{'discover':'读取服务器节点','delete':'删除指定入站与独立守护','exits':'读取可切换出口','switch':'切换指定节点出口并验收'}[operation])
+        code,out=ssh_run(client,'python3 '+shlex.quote(remote+'/action.py')+' '+shlex.quote(remote+'/request.json'),timeout=240)
         if code:raise ValueError(deployment_failure(out,data))
         result=json.loads(out.strip().splitlines()[-1])
-        if operation=='discover':
+        if operation in ('exits','switch'):
+            if operation=='switch':
+                with db() as c:
+                    record=c.execute('SELECT result FROM nodes WHERE id=?',(data['nodeId'],)).fetchone();value=json.loads(record['result']);value.update(exit_ip=result['exit_ip'],country=result['country']);c.execute('UPDATE nodes SET result=?,updated=? WHERE id=?',(json.dumps(value),time.time(),data['nodeId']))
+            event(job,'complete','done','出口已切换并验收' if operation=='switch' else '可选出口已读取')
+        elif operation=='discover':
             settings=json.loads(CONFIG.read_text());protected=[settings.get('hostname'),*settings.get('reserved_hosts',[])]
             found=0
             for item in result['nodes']:
@@ -284,19 +289,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=65536:raise ValueError('请求大小无效')
-            data=json.loads(self.rfile.read(length));operation='delete' if self.path=='/delete' else 'discover'
-            if operation=='delete':
+            data=json.loads(self.rfile.read(length));operation={'/delete':'delete','/discover':'discover','/exit-options':'exits','/switch':'switch'}[self.path]
+            if operation!='discover':
                 with db() as c:row=c.execute('SELECT * FROM nodes WHERE id=? AND actor=?',(data.get('nodeId',''),actor)).fetchone()
                 if not row:raise ValueError('节点不存在，请先从服务器读取节点')
                 config=json.loads(row['config'])
-                if data.get('confirmDomain')!=config['domain']:raise ValueError('确认域名不匹配')
+                if operation=='delete' and data.get('confirmDomain')!=config['domain']:raise ValueError('确认域名不匹配')
                 data={**data,**config}
             else:data.update(domain='discovery.invalid',port=443,path='/',region='ZZ')
-            data=validate(data);data.update(_operation=operation,_actor=actor)
+            data=validate(data,require_secret=False)
+            if not (data.get('password') or data.get('privateKey')):raise ValueError('请提供 SSH 密码或私钥')
+            if operation=='delete' and not data.get('cfToken'):raise ValueError('后台尚未配置 Cloudflare Token')
+            data.update(_operation=operation,_actor=actor)
             with db() as c:
                 if c.execute("SELECT count(*) FROM jobs WHERE status IN ('running','queued')").fetchone()[0]>=4:return self.send(429,{'error':'任务队列已满'})
                 job=secrets.token_hex(16);public={k:data[k] for k in ('ip','domain','port','path','region','sshPort','_operation')}
-                if operation=='delete':public['nodeId']=data['nodeId']
+                if operation!='discover':public['nodeId']=data['nodeId']
                 c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',(job,actor,'queued',time.time(),json.dumps(public),None,None))
             event(job,'queue','running','节点管理任务已进入队列');EXECUTOR.submit(node_worker,job,data)
             return self.send(202,{'id':job,'status':'queued'})
@@ -308,7 +316,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path=='/regions/refresh':
             try:return self.send(200,regions(force=True))
             except Exception as error:return self.send(503,{'error':str(error)})
-        if self.path in ('/discover','/delete'):return self.node_task(actor)
+        if self.path in ('/discover','/delete','/exit-options','/switch'):return self.node_task(actor)
         if self.path!='/jobs':return self.send(404,{'error':'Not found'})
         try:
             length=int(self.headers.get('Content-Length','0'))
