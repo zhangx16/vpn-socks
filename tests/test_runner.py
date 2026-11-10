@@ -7,12 +7,21 @@ runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
 
 class RunnerTests(unittest.TestCase):
  def setUp(self):
+  def fetch_pool(directory,force=False):
+   response=runner.subprocess.run(['mock-official-fetch'])
+   if response.returncode:raise ValueError('offline')
+   import csv,io
+   text=response.stdout.decode();items={}
+   for index,r in enumerate(csv.DictReader(io.StringIO(text[text.index('#HostName,')+1:]))):
+    if r.get('CountryShort'):items[str(index)]={'row':r}
+   return {'updated_at':runner.time.time(),'items':items,'sources':[]}
+  self.collect_patch=patch.object(runner,'collect_pool',side_effect=fetch_pool);self.collect_patch.start()
   self.temporary=tempfile.TemporaryDirectory();runner.ROOT=Path(self.temporary.name);runner.CONFIG=runner.ROOT/'config.json';runner.CATALOG={}
   runner.CONFIG.write_text(json.dumps({'auth_sha256':hashlib.sha256(b'test-runner-secret').hexdigest(),'hostname':'runner.example.com'}));runner.init()
   self.server=runner.http.server.ThreadingHTTPServer(('127.0.0.1',0),runner.Handler);self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
   self.url='http://127.0.0.1:'+str(self.server.server_port)
   self.payload={'ip':'8.8.4.4','domain':'node.example.com','port':35001,'path':'/ws','region':'RO','sshPort':22,'username':'root','password':'not-a-real-ssh-password','cfToken':'not-a-real-cf-token'}
- def tearDown(self):self.server.shutdown();self.server.server_close();self.temporary.cleanup()
+ def tearDown(self):self.collect_patch.stop();self.server.shutdown();self.server.server_close();self.temporary.cleanup()
  def request(self,path,body=None,token='test-runner-secret',actor='owner'):
   req=urllib.request.Request(self.url+path,data=json.dumps(body).encode() if body is not None else None,headers={'Authorization':'Bearer '+token,'X-Actor':actor,'Content-Type':'application/json'})
   try:
@@ -25,7 +34,7 @@ class RunnerTests(unittest.TestCase):
    catalog=runner.regions()
   self.assertEqual(catalog['regions'],[{'code':'JP','name':'Japan','count':2},{'code':'RO','name':'Romania','count':1}]);self.assertEqual(catalog['scope'],'all')
  def test_force_refresh_bypasses_a_fresh_cache(self):
-  original={'scope':'all','updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
+  original={'scope':'all','mode':'official-merged','updated_at':runner.time.time(),'stale':False,'regions':[{'code':'JP','count':1}]};runner.CATALOG=original
   sample=b'*vpn_servers\n#HostName,IP,CountryShort,CountryLong\nvpn2,8.8.4.4,CA,Canada\n*\n'
   with patch.object(runner.subprocess,'run',return_value=Mock(returncode=0,stdout=sample)) as fetch:
    self.assertEqual(runner.regions()['regions'][0]['code'],'JP');fetch.assert_not_called()

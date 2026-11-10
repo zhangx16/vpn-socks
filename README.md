@@ -210,3 +210,28 @@ node --test scripts/test.mjs scripts/test-bridge.mjs
 ### 手动刷新候选
 
 出口地区列表由执行器缓存 10 分钟。页面在前台每 10 分钟自动读取，回到页面时也会读取。点击「获取最新候选」会通过受认证的 POST 接口跳过缓存，从上游重新获取并显示获取时间、地区数和候选总数。失败时保留原列表并提示失败，不会把旧缓存标成新结果。候选来自公开列表，真实连通性仍需部署或测速验证。
+
+
+## 扩充上游出口池
+
+单次 VPN Gate CSV 响应只包含部分公开节点。本项目使用官方主站 CSV，加上从官方镜像目录动态发现的镜像 CSV 进行汇总，不使用猜测的私有接口或扫描未知地址。每轮最多访问主站和 4 个镜像，镜像轮换选择，最多 3 路并发、每个请求限时 9 秒。后台每 10 分钟更新；网页手动获取可强制刷新。
+
+汇总按独立公网 IPv4 去重。相同服务器域名出现新 IP 时淘汰旧配置；最近 24 小时未再次出现的节点自动过期。不同时间和不同来源的公开快照会积累到同一池中，因此数量可能逐步增长。历史候选不等于当前在线；连接验证和速度复测仍保留。
+
+本机 `fanout-pool` 服务只监听 `127.0.0.1:35014`，提供 `/catalog.csv` 和 `/status`。数据库和 CSV 位于 `/var/lib/fanout-pool`。网页执行器、fanout 的原生管理器、新服务器部署，以及自动优选统一使用聚合结果。
+
+fanout 上游没有可直接切换主 CSV URL 的参数，因此使用 `patches/fanout-catalog-source.patch` 的四行逻辑，新增 `FANOUT_VPNGATE_SOURCE` 环境变量。构建脚本固定上游版本 `d7ce5224caf3469b19876982abdf8d1be16c4a8b`，未设置环境变量时保持原来行为。`scripts/install-pool.sh` 安装聚合服务和配置，`scripts/build-fanout-pool.sh` 构建这个小补丁版本，需要 Go 1.24 或更新版本。升级上游二进制会覆盖此改动，需重新应用补丁。
+
+```sh
+python3 /usr/local/libexec/fanout/catalog_pool.py --force
+curl http://127.0.0.1:35014/status
+```
+
+官方镜像目录见 https://www.vpngate.net/en/sites.aspx 。目录内部分镜像只提供 HTTP，所以不将其当成 TLS 验证来源；导入时验证公网 IP、国家代码、Base64 和 OpenVPN 配置，并拒绝可执行脚本指令。不会承诺能获取官网统计中的全部中继，也不把全部中继总量当作候选数。
+
+
+### 合并已管理服务器的官方快照
+
+`/var/lib/fanout-pool/peers.json` 可配置最多两台已管理的采集服务器。使用专用 SSH 密钥，远端 `authorized_keys` 必须绑定固定的 `command="/bin/cat /var/lib/fanout-pool/pool.json",restrict`，并预先固定服务器主机密钥。采集器只接收该固定文件，不接受浏览器指定采集目标或远程命令。安装 SSH 客户端后，可在私有配置中提供 `name`、`host`、`port`、`user`、`key_file`、`known_hosts_file`。
+
+合并时保留原快照的 `last_seen`，不会因为同步而延长失效节点寿命；对端失败不影响主站和官方镜像获取。SSH 私钥和实际 peer 配置不得提交到仓库。这样控制台可以同时利用不同已管理服务器从官方取得的不同公开快照。

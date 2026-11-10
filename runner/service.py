@@ -2,11 +2,14 @@
 """Authenticated HTTPS-adjacent SSH job runner. Passwords and CF tokens stay in RAM."""
 import concurrent.futures, csv, hashlib, hmac, http.server, io, ipaddress, json, os, re
 import secrets, shlex, sqlite3, subprocess, tarfile, threading, time, urllib.parse, urllib.request
+import sys
 from pathlib import Path
 import paramiko
 
 ROOT=Path(os.environ.get('VPN_RUNNER_DIR','/var/lib/vpn-runner'))
 PROJECT=Path(os.environ.get('VPN_RUNNER_PROJECT','/root/vpn-socks'))
+sys.path.insert(0,str(PROJECT/'libexec'))
+from catalog_pool import collect as collect_pool
 CONFIG=Path(os.environ.get('VPN_RUNNER_CONFIG','/etc/vpn-runner.json'))
 LOCK=threading.Lock()
 EXECUTOR=concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -29,25 +32,23 @@ def event(job,step,state,message):
 def regions(force=False):
     global CATALOG
     with LOCK:
-        if not force and CATALOG and CATALOG.get('scope')=='all' and time.time()-CATALOG['updated_at']<600:return CATALOG
+        if not force and CATALOG and CATALOG.get('mode')=='official-merged' and time.time()-CATALOG['updated_at']<600:return CATALOG
         try:
-            response=subprocess.run(['curl','-4','-fsSL','--connect-timeout','5','--max-time','20','https://www.vpngate.net/api/iphone/'],capture_output=True,timeout=25)
-            if response.returncode:raise ValueError('catalog fetch failed')
-            text=response.stdout[:8_000_000].decode('utf-8-sig')
-            start=text.index('#HostName,')+1
+            pool=collect_pool(Path(os.environ.get('VPN_POOL_DIR','/var/lib/fanout-pool')),force)
             counts={}
-            for row in csv.DictReader(io.StringIO(text[start:])):
+            for item in pool['items'].values():
+                row=item['row']
                 code=row.get('CountryShort') or ''
                 if not re.fullmatch('[A-Z]{2}',code):continue
                 value=counts.setdefault(code,{'code':code,'name':row.get('CountryLong',code),'count':0});value['count']+=1
             if not counts:raise ValueError('empty catalog')
-            CATALOG={'scope':'all','updated_at':time.time(),'stale':False,'regions':sorted(counts.values(),key=lambda r:(-r['count'],r['code']))}
+            CATALOG={'scope':'all','mode':'official-merged','updated_at':pool['updated_at'],'stale':pool.get('stale',False),'unique_ips':len(pool['items']),'fresh_unique_ips':pool.get('fresh_unique_ips',0),'sources':pool.get('sources',[]),'retention_hours':24,'regions':sorted(counts.values(),key=lambda r:(-r['count'],r['code']))}
             (ROOT/'catalog.json').write_text(json.dumps(CATALOG));return CATALOG
         except Exception:
             if force:raise ValueError('获取最新出口列表失败，原候选列表未被替换，请稍后重试') from None
             previous=CATALOG
             if not previous and (ROOT/'catalog.json').exists():previous=json.loads((ROOT/'catalog.json').read_text())
-            if previous and previous.get('scope')=='all' and time.time()-previous['updated_at']<86400:return {**previous,'stale':True}
+            if previous and previous.get('mode')=='official-merged' and time.time()-previous['updated_at']<600:return {**previous,'stale':True}
             raise ValueError('出口列表暂时不可用，请稍后刷新') from None
 
 def validate(data,require_secret=True):
@@ -81,7 +82,7 @@ def key_for(data):
 
 def bundle(path):
     with tarfile.open(path,'w:gz') as archive:
-        for name in ('bin','config','libexec','scripts','openrc','systemd','install.sh'):
+        for name in ('bin','config','libexec','scripts','openrc','systemd','patches','install.sh'):
             source=PROJECT/name
             if source.exists():archive.add(source,arcname='vpn-socks/'+name,filter=lambda info:None if '__pycache__' in info.name or info.name.endswith('.pyc') else info)
 

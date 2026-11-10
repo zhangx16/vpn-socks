@@ -150,8 +150,7 @@ def scan_and_replace(config, state, baseline):
     log('low-bandwidth '+config['region']+' scan started; keeping existing exits and health watchdog running')
     created=set(); selected=[]; old_managed=set(read_json(ROOT/'managed-slots.json',[]))
     try:
-        fetch=subprocess.run(['curl','-4','-fsSL','--connect-timeout','8','--max-time','40','--retry','1',
-             'https://www.vpngate.net/api/iphone/','-o',str(work/'snapshot.csv')],
+        fetch=subprocess.run(['python3','/usr/local/libexec/fanout/catalog_pool.py','--output',str(work/'snapshot.csv')],
              capture_output=True,text=True,timeout=90)
         if fetch.returncode: raise RuntimeError('fresh VPN Gate snapshot download failed')
         with (work/'progress.log').open('w') as output:

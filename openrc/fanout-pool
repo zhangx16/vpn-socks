@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+name="fanout-pool"
+description="Official VPN Gate source aggregation and rolling pool"
+command="/usr/bin/python3"
+command_args="/usr/local/libexec/fanout/pool_server.py"
+command_background=true
+pidfile="/run/fanout-pool.pid"
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
+output_log="/var/log/fanout-pool.log"
+error_log="/var/log/fanout-pool.log"
+depend() { need net; before fanout; }

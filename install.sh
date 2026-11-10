@@ -29,6 +29,7 @@ for service in fanout-speed fanout-ha fanout-probe; do service_stop "$service" >
 install -m 755 "$ROOT/bin/fanout-ha" /usr/local/sbin/fanout-ha
 install -m 755 "$ROOT/bin/fanout-speed" /usr/local/sbin/fanout-speed
 install -m 755 "$ROOT/libexec/scan-jp" /usr/local/libexec/fanout/scan-jp
+for file in catalog_pool.py pool_server.py;do install -m 755 "$ROOT/libexec/$file" "/usr/local/libexec/fanout/$file";done
 for service in fanout-probe fanout-ha fanout-speed; do
     if [ "$INIT" = openrc ]; then install -m 755 "$ROOT/openrc/$service" "/etc/init.d/$service"
     else install -m 644 "$ROOT/systemd/$service.service" "/etc/systemd/system/$service.service"; fi

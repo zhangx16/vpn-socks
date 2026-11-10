@@ -1,0 +1,15 @@
+diff --git a/vpngate.go b/vpngate.go
+index 699abdf..87cbdbf 100644
+--- a/vpngate.go
++++ b/vpngate.go
+@@ -84,6 +84,10 @@ func isResidential(hostName, ip string) bool {
+ // 先直连；连不上或者拿回来的内容不对（被拦截、返回门户页）就换反代再试一次。
+ // 返回的列表已按速度降序排列。
+ func fetchNodes(timeout time.Duration) ([]Node, error) {
++	source := strings.TrimSpace(os.Getenv("FANOUT_VPNGATE_SOURCE"))
++	if source != "" {
++		return fetchNodesWith(source, timeout)
++	}
+ 	return fetchNodesWith(vpngateAPI, timeout)
+ }
+ 
