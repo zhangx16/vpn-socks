@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import http.cookiejar,json,subprocess,sys,urllib.parse,urllib.request
 from pathlib import Path
-expected=json.loads(sys.argv[1]);run=subprocess.run(['curl','-4','-fsS','--connect-timeout','4','--max-time','18','--socks5-hostname','127.0.0.1:10809','https://www.cloudflare.com/cdn-cgi/trace'],capture_output=True,text=True)
+expected=json.loads(sys.argv[1]);node_config=Path('/var/lib/fanout-nodes')/str(expected['port'])/'node.json';probe=json.loads(node_config.read_text())['cf_port'] if node_config.exists() else 10809;run=subprocess.run(['curl','-4','-fsS','--connect-timeout','4','--max-time','18','--socks5-hostname','127.0.0.1:'+str(probe),'https://www.cloudflare.com/cdn-cgi/trace'],capture_output=True,text=True)
 values=dict(line.split('=',1) for line in run.stdout.splitlines() if '=' in line)
 if run.returncode or values.get('loc')!=expected['region']:raise SystemExit(1)
 settings=json.loads(Path('/var/lib/fanout/settings.json').read_text());base='http://127.0.0.1:'+str(settings['port'])+'/'+Path('/var/lib/fanout/basepath').read_text().strip()

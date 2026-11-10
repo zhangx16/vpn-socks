@@ -100,3 +100,26 @@ export async function configure(input,emit,fetcher=fetch){
  if(!check.ok){await new Promise(resolve=>setTimeout(resolve,1500));check=await verify(config,fetcher);}
  event('verify',check.ok?'done':'pending',check.message);event('complete',check.ok?'done':'pending',check.ok?'自动配置完成，WebSocket 验收通过':'配置已保存，链路验收待生效',{...plan,verified:check.ok});
 }
+
+// Remove only this hostname's managed resources. A changed origin is never removed.
+export async function removeNode(input,fetcher=fetch){
+ const config=validateConfig(input),api=client(input.token,fetcher),zone=await zoneFor(api,config.domain),base='/zones/'+zone.id;
+ const records=await api(base+'/dns_records?name='+encodeURIComponent(config.domain)+'&per_page=100');
+ const addresses=records.filter(r=>r.name===config.domain&&['A','AAAA','CNAME'].includes(r.type));
+ if(addresses.some(r=>r.type!=='A'||r.content!==config.ip))throw Error('DNS 已指向其他源站，拒绝删除；请人工核对');
+ const removals=[];
+ for(const [phase,kind] of [['http_request_origin','origin'],['http_config_settings','tls']]){
+  const set=await api(base+'/rulesets/phases/'+phase+'/entrypoint','GET',undefined,true);if(!set)continue;
+  const wanted=desiredRule(config,kind);
+  for(const rule of set.rules||[]){
+   if(normalize(rule.expression)!==normalize(wanted.expression))continue;
+   if(rule.ref!==wanted.ref&&rule.description!==wanted.description)continue;
+   if(kind==='origin'&&rule.action_parameters?.origin?.port!==config.port)throw Error('回源端口已变化，拒绝删除');
+   removals.push(base+'/rulesets/'+set.id+'/rules/'+rule.id);
+  }
+ }
+ // Hide the endpoint first; retries are idempotent if a later rule deletion fails.
+ for(const record of addresses)await api(base+'/dns_records/'+record.id,'DELETE');
+ for(const path of removals)await api(path,'DELETE');
+ return {dnsDeleted:addresses.length,rulesDeleted:removals.length};
+}

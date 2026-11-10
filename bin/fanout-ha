@@ -2,13 +2,16 @@
 # Manage the existing two inbound bindings through fanout's API.
 set -uo pipefail
 umask 077
-DIR=/var/lib/fanout-ha
+DIR=${FANOUT_HA_DIR:-/var/lib/fanout-ha}
+HA_CONFIG=${FANOUT_HA_CONFIG:-/etc/fanout-ha.json}
+CF_PROXY=${FANOUT_CF_PROXY:-socks5h://127.0.0.1:10809}
+ORIGIN_PROXY=${FANOUT_ORIGIN_PROXY:-socks5h://127.0.0.1:10810}
 mkdir -p "$DIR"
-REGION=$(jq -r '.region // "JP"' /etc/fanout-ha.json 2>/dev/null) || REGION=JP
-PRIMARY_TAG=$(jq -r '.primary_inbound_tag // "in-33003-ws"' /etc/fanout-ha.json 2>/dev/null) || PRIMARY_TAG=in-33003-ws
-mapfile -t INBOUND_TAGS < <(jq -r '.inbound_tags[]' /etc/fanout-ha.json 2>/dev/null)
+REGION=$(jq -r '.region // "JP"' "$HA_CONFIG" 2>/dev/null) || REGION=JP
+PRIMARY_TAG=$(jq -r '.primary_inbound_tag // "in-33003-ws"' "$HA_CONFIG" 2>/dev/null) || PRIMARY_TAG=in-33003-ws
+mapfile -t INBOUND_TAGS < <(jq -r '.inbound_tags[]' "$HA_CONFIG" 2>/dev/null)
 ((${#INBOUND_TAGS[@]})) || INBOUND_TAGS=(in-33003-ws in-33002-ws)
-exec 9> /run/fanout-ha.lock
+exec 9> "${FANOUT_HA_LOCK:-/run/fanout-ha.lock}"
 flock -w 20 9 || { printf "%s\n" "Another fanout-ha instance holds the lock; no switch was performed." >&2; exit 75; }
 log() { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
 api() { curl -fsS --connect-timeout 2 --max-time 8 -b "$DIR/cookies" "$@"; }
@@ -42,7 +45,7 @@ switch_to() {
     log "switched both VLESS inbounds to slot=$slot host=$host expected_ip=$ip"
     sleep 1
     local got
-    got=$(probe socks5h://127.0.0.1:10809) || got=""
+    got=$(probe "$CF_PROXY") || got=""
     if [[ "$got" = "$ip" ]]; then
         log "CF end-to-end verified exit_ip=$got"
         status_write healthy "$slot" "$got"
@@ -65,6 +68,10 @@ cycle() {
     BASE="http://127.0.0.1:$management_port/$bp"
     curl -fsS --max-time 5 -c "$DIR/cookies" --data-urlencode "password=$pw" "$BASE/login" >/dev/null 2>&1 || { log 'fanout API login unavailable'; return; }
     view=$(api "$BASE/api/exits") || { log 'fanout exits API unavailable'; return; }
+    if [[ -s ${FANOUT_SPEED_DIR:-/var/lib/fanout-speed}/managed-slots.json ]]; then
+        allowed=$(cat "${FANOUT_SPEED_DIR:-/var/lib/fanout-speed}/managed-slots.json" 2>/dev/null) || allowed='[]'
+        view=$(jq --argjson allowed "$allowed" '.exits |= map(select(.slot as $s | $allowed | index($s)))' <<< "$view") || return
+    fi
     jq -e '.exits | type=="array"' <<< "$view" >/dev/null || return
     current=$(jq -r --arg tag "$PRIMARY_TAG" '.exits[] | select(any(.inbounds[]?; .tag==$tag)) | .slot' <<< "$view" | head -1)
     [[ -n "$current" ]] || current=$(cat "$DIR/active-slot" 2>/dev/null || echo 1)
@@ -102,7 +109,7 @@ cycle() {
         [[ -n "$candidate" ]] && switch_to "$candidate"
         return
     fi
-    got=$(probe socks5h://127.0.0.1:10809) || got=""
+    got=$(probe "$CF_PROXY") || got=""
     if [[ -n "$expected" && "$got" = "$expected" && "$(jq -r .status <<< "$row")" = up ]]; then
         FAILURES=0
         LAST_NOTICE=""
@@ -115,7 +122,7 @@ cycle() {
     # A known-down tunnel can fail over immediately; ambiguous failures need two samples.
     if [[ "$(jq -r .status <<< "$row")" = up ]] && ((FAILURES < 2)); then return; fi
     if [[ "$row" != '{}' && -n "$expected" ]] && probe_exit "$row"; then
-        healthy_origin=$(probe socks5h://127.0.0.1:10810) || healthy_origin=""
+        healthy_origin=$(probe "$ORIGIN_PROXY") || healthy_origin=""
         if [[ "$healthy_origin" = "$expected" ]]; then
             if [[ "$LAST_NOTICE" != cf ]]; then log 'CF path unavailable while local VLESS and VPN exit work; preserving the active exit'; fi
             LAST_NOTICE=cf

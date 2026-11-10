@@ -17,8 +17,8 @@ emit install running '检查系统依赖和网络命名空间'
 sh "$JOB/vpn-socks/scripts/preflight.sh"
 . /etc/os-release
 case "$ID" in
- alpine) apk add --no-cache bash curl jq python3 iproute2 iptables openvpn util-linux openssl unzip ca-certificates logrotate > "$JOB/packages.log" 2>&1 ;;
- debian|ubuntu) apt-get update -qq > "$JOB/packages.log" 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash curl jq python3 iproute2 iptables openvpn util-linux openssl unzip ca-certificates logrotate >> "$JOB/packages.log" 2>&1 ;;
+ alpine) apk add --no-cache bash curl jq python3 iproute2 iptables openvpn util-linux openssl unzip ca-certificates logrotate nginx > "$JOB/packages.log" 2>&1 ;;
+ debian|ubuntu) apt-get update -qq > "$JOB/packages.log" 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash curl jq python3 iproute2 iptables openvpn util-linux openssl unzip ca-certificates logrotate nginx >> "$JOB/packages.log" 2>&1 ;;
  *) emit install error '此发行版暂不支持自动部署'; exit 1 ;;
 esac
 test -c /dev/net/tun || { emit install error '服务器未开放 TUN 设备'; exit 1; }

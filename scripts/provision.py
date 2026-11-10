@@ -21,7 +21,15 @@ with opener.open(urllib.request.Request(base+'/api/settings',data=json.dumps({'r
 view=api('/api/exits')
 if view.get('backend')!='native':raise SystemExit('Existing fanout backend is not native; refusing to change its mode')
 store=json.loads(Path('/var/lib/fanout/native.json').read_text()) if Path('/var/lib/fanout/native.json').exists() else {'inbounds':[]}
-inbound=next((r for r in store['inbounds'] if r['port']==request['port']),None)
+public_port=request['port']
+sys.path.insert(0,str(project/'libexec'))
+from node_plan import plan
+registry=Path('/var/lib/fanout-ingress/nodes.json');ingress=json.loads(registry.read_text()) if registry.exists() else {}
+def available(port):
+ with socket.socket() as probe:
+  try:probe.bind(('0.0.0.0',port));return True
+  except OSError:return False
+request,inbound=plan(request,store['inbounds'],ingress,available)
 emit('inbound','running','配置 VLESS WebSocket TLS 入站')
 if inbound:
  if inbound['protocol']!='vless' or inbound['network']!='ws' or inbound['security']!='tls' or inbound['path']!=request['path'] or inbound.get('tls',{}).get('server_name')!=request['domain']:
@@ -32,10 +40,17 @@ else:
  try:s.bind(('0.0.0.0',request['port']))
  except OSError:raise SystemExit('Selected node port is already used by another service')
  finally:s.close()
- api('/api/panel/inbound/new',{'protocol':'vless','network':'ws','security':'tls','port':request['port'],'path':request['path'],'sni':request['domain'],'remark':region+'-Residential-CF'},True)
+ api('/api/panel/inbound/new',{'protocol':'vless','network':'ws','security':'tls','port':request['port'],'path':request['path'],'sni':request['domain'],'remark':region+'-CF'},True)
 emit('inbound','done','节点入站已就绪')
 emit('exit','running','连接所选国家出口；失败候选会自动尝试替换')
-def matching():return [r for r in api('/api/exits')['exits'] if r['region']==region]
+tag='in-'+str(request['port'])+'-ws'
+reserved=set()
+legacy=Path('/etc/fanout-ha.json');legacy_slots=Path('/var/lib/fanout-speed/managed-slots.json')
+if legacy.exists() and legacy_slots.exists() and json.loads(legacy.read_text()).get('primary_inbound_tag')!=tag:reserved.update(json.loads(legacy_slots.read_text()))
+for file in Path('/var/lib/fanout-nodes').glob('*/speed/managed-slots.json'):
+ if (file.parent.parent/'disabled').exists():continue
+ if file.parent.parent.name!=str(request['port']):reserved.update(json.loads(file.read_text()))
+def matching():return [r for r in api('/api/exits')['exits'] if r['region']==region and r['slot'] not in reserved and (not r.get('inbounds') or any(i['tag']==tag for i in r.get('inbounds') or []))]
 rows=matching()
 if len(rows)<2:
  try:api('/api/provision',{'region':region,'count':2-len(rows)},True)
@@ -53,15 +68,16 @@ tag='in-'+str(request['port'])+'-ws'
 active=next((r for r in up if any(i['tag']==tag for i in r.get('inbounds') or [])),up[0])
 api('/api/xui/bind',{'tag':tag,'host':active['host']},True)
 emit('exit','done','出口 '+active['exit_ip']+'；独立热备 '+str(max(0,len(up)-1))+' 条')
-emit('monitor','running','安装健康守护与 20 Mbps 自动优选')
+emit('monitor','running','配置共享端口入口与独立守护')
+subprocess.run(['python3',str(project/'scripts/install-ingress.py'),json.dumps(request)],check=True)
 env={**os.environ,'ALLOW_SINGLE_EXIT':'1'}
 with open(Path(sys.argv[1]).parent/'overlay-install.log','w') as output:
- result=subprocess.run(['sh',str(project/'install.sh'),request['domain'],region,str(request['port'])],env=env,stdout=output,stderr=subprocess.STDOUT)
+ result=subprocess.run(['python3',str(project/'scripts/install-node.py'),request['domain'],region,str(request['port'])],env=env,stdout=output,stderr=subprocess.STDOUT)
 if result.returncode:raise SystemExit('Overlay service installation failed; see private overlay-install.log')
 emit('monitor','done','后台守护和开机自启已配置')
 store=json.loads(Path('/var/lib/fanout/native.json').read_text())
 inbound=next(r for r in store['inbounds'] if r['port']==request['port']);client=next(c for c in inbound['clients'] if c['enable'])
 query=urllib.parse.urlencode({'encryption':'none','security':'tls','sni':request['domain'],'type':'ws','host':request['domain'],'path':request['path']})
-link='vless://'+client['id']+'@'+request['domain']+':443?'+query+'#'+region+'-Residential-CF'
-node={'link':link,'domain':request['domain'],'region':region,'exit_ip':active['exit_ip'],'standby_ips':[r['exit_ip'] for r in up if r['slot']!=active['slot']],'warning':None if len(up)>1 else '所选地区当前只有一条可用出口，暂无独立热备'}
+link='vless://'+client['id']+'@'+request['domain']+':443?'+query+'#'+region+'-CF'
+node={'link':link,'domain':request['domain'],'region':region,'exit_ip':active['exit_ip'],'standby_ips':[r['exit_ip'] for r in up if r['slot']!=active['slot']],'port':public_port,'listen_port':request['port'],'warning':None if len(up)>1 else '所选地区当前只有一条可用出口，暂无独立热备'}
 print(json.dumps({'kind':'node','data':node},ensure_ascii=False),flush=True)

@@ -1,3 +1,7 @@
+# 自托管管理员控制台与多出口节点
+
+当前推荐运行方式为服务器本地控制台，支持管理员账号密码登录、同服务器多出口、同域名不同 WS 路径节点，以及单节点删除。安装与操作见 [portal/README.md](portal/README.md)。`web/control/worker` 中保留了早期 Sites / Worker 适配器；自托管版本使用同目录页面和 Cloudflare 配置模块，HTTP 入口为 `portal/server.py`。
+
 # vpn-socks
 
 给 [byJoey/fanout](https://github.com/byJoey/fanout) 增加同地区出口热备、Cloudflare → VLESS 完整链路检测，以及低带宽触发的出口库自动优选。支持出口库实际提供的国家/地区，网页动态展示候选数量；每台服务器只从选定地区选择主备。适用于已经配置好 VLESS WebSocket、Cloudflare 端口回源的 Alpine/OpenRC 或 Debian/Ubuntu/systemd NAT 服务器。

@@ -15,10 +15,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-ROOT = Path('/var/lib/fanout-speed')
-HA = Path('/var/lib/fanout-ha')
+ROOT = Path(os.environ.get('FANOUT_SPEED_DIR','/var/lib/fanout-speed'))
+HA = Path(os.environ.get('FANOUT_HA_DIR','/var/lib/fanout-ha'))
 CONFIG = Path('/etc/fanout-speed.json')
-HA_CONFIG = Path('/etc/fanout-ha.json')
+HA_CONFIG = Path(os.environ.get('FANOUT_HA_CONFIG','/etc/fanout-ha.json'))
 DEFAULTS = dict(threshold_mbps=20, check_interval_seconds=300, consecutive_low=3,
                 scan_cooldown_seconds=3600, sample_bytes=8000000,
                 sample_timeout_seconds=12, finalists=6, minimum_gain_ratio=1.2)
@@ -88,7 +88,7 @@ class API:
         self.call('/api/stop?'+urllib.parse.urlencode({'slot':slot}), method='POST')
         return True
 
-def throughput(config, proxy='socks5h://127.0.0.1:10809', auth=None):
+def throughput(config, proxy=os.environ.get('FANOUT_CF_PROXY','socks5h://127.0.0.1:10809'), auth=None):
     args=['curl','-4','-sS','--connect-timeout','4','--max-time',str(config['sample_timeout_seconds']),
           '--proxy',proxy,'-o','/dev/null','-w','%{http_code} %{size_download} %{speed_download}',
           'https://speed.cloudflare.com/__down?bytes='+str(config['sample_bytes'])]
@@ -123,6 +123,13 @@ def request_switch(row):
 
 def ensure_candidate(api, candidate, created):
     existing=next((r for r in api.view()['exits'] if r['host']==candidate['host']),None)
+    reserved=set()
+    legacy=read_json('/etc/fanout-ha.json',{})
+    if os.environ.get('FANOUT_NODE_MODE') and legacy.get('primary_inbound_tag')!=read_json(HA_CONFIG,{}).get('primary_inbound_tag'):reserved.update(read_json('/var/lib/fanout-speed/managed-slots.json',[]))
+    for file in Path('/var/lib/fanout-nodes').glob('*/speed/managed-slots.json'):
+        if (file.parent.parent/'disabled').exists():continue
+        if file.parent!=ROOT:reserved.update(read_json(file,[]))
+    if existing and (existing['slot'] in reserved or any(i['tag']!=read_json(HA_CONFIG,{}).get('primary_inbound_tag','in-33003-ws') for i in existing.get('inbounds') or [])):return None
     if existing and existing['status']=='up' and existing['exit_ip']==candidate['ip'] and exit_valid(existing):
         return existing
     if existing: return None
@@ -244,12 +251,16 @@ def tick(force_scan=False):
     write_json(ROOT/'state.json',state)
     log('CF sample Mbps='+str(state['last_mbps'])+' threshold='+str(config['threshold_mbps'])+' low_count='+str(count))
     due=count>=config['consecutive_low'] and time.time()-state.get('last_scan_started',0)>=config['scan_cooldown_seconds']
-    if force_scan or due: scan_and_replace(config,state,bps)
+    if force_scan or due:
+        with open('/run/fanout-candidate-scan.lock','w') as shared:
+            try:fcntl.flock(shared,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:log('another node is scanning; defer until next check');return
+            scan_and_replace(config,state,bps)
 
 def main():
     os.umask(0o077)
     ROOT.mkdir(parents=True,exist_ok=True,mode=0o700)
-    with open('/run/fanout-speed.lock','w') as lock:
+    with open(os.environ.get('FANOUT_SPEED_LOCK','/run/fanout-speed.lock'),'w') as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: raise SystemExit('fanout-speed is already running')
         parser=argparse.ArgumentParser()

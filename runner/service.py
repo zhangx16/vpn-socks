@@ -24,6 +24,7 @@ def init():
     os.umask(0o077);ROOT.mkdir(parents=True,exist_ok=True)
     with db() as c:
         c.executescript('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,actor TEXT,status TEXT,created REAL,config TEXT,result TEXT,error TEXT); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,time REAL,step TEXT,state TEXT,message TEXT);')
+        c.execute('CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY,actor TEXT,config TEXT,result TEXT,status TEXT,updated REAL)')
         c.execute("UPDATE jobs SET status='interrupted',error='执行器重启，凭据未持久化；请重新提交任务' WHERE status IN ('queued','running')")
 
 def event(job,step,state,message):
@@ -166,7 +167,7 @@ def job_worker(job,data):
         if cf.returncode:raise ValueError('Cloudflare 配置失败：'+error[-1000:].replace(data['cfToken'],'[redacted]'))
         event(job,'cloudflare','done','DNS 和回源规则已保存')
         event(job,'verify','running','验证完整 CF → VLESS → 所选国家出口链路')
-        encoded=json.dumps({'region':data['region'],'port':data['port']})
+        encoded=json.dumps({'region':data['region'],'port':node.get('listen_port',data['port'])})
         verifier=str(Path(remote)/'vpn-socks/scripts/verify-node.py')
         for attempt in range(12):
             code,out=ssh_run(client,'python3 '+shlex.quote(verifier)+' '+shlex.quote(encoded),timeout=30)
@@ -174,6 +175,7 @@ def job_worker(job,data):
                 verified=json.loads(out.strip().splitlines()[-1]);node.update(verified);break
             time.sleep(5)
         else:raise ValueError('节点已安装，但完整链路或出口国家验收未通过；请检查域名生效状态和出口可用性')
+        register_node(data,node,data.get('_actor','admin'))
         event(job,'verify','done','实际出口 '+node['exit_ip']+'，国家 '+node['country'])
         event(job,'complete','done','部署完成，节点链接已生成')
         with db() as c:c.execute("UPDATE jobs SET status='succeeded',result=? WHERE id=?",(json.dumps(node),job))
@@ -187,6 +189,67 @@ def job_worker(job,data):
         if client:client.close()
         package.unlink(missing_ok=True)
         for field in ('password','privateKey','cfToken'):data[field]=''
+
+def register_node(data,node,actor):
+    uuid=urllib.parse.urlparse(node['link']).username
+    identity=hashlib.sha256((data['ip']+':'+str(data['port'])+':'+uuid).encode()).hexdigest()[:32]
+    config={k:data[k] for k in ('ip','domain','port','path','region','sshPort')};config['uuid']=uuid;config['listenPort']=node.get('listen_port',data.get('listenPort',data['port']))
+    with db() as c:c.execute('INSERT OR REPLACE INTO nodes VALUES(?,?,?,?,?,?)',(identity,actor,json.dumps(config),json.dumps(node),'active',time.time()))
+    return identity
+
+def connect(data):
+    client=paramiko.SSHClient();known=ROOT/'known_hosts'
+    if not known.exists():known.touch(mode=0o600)
+    client.load_host_keys(str(known));client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(data['ip'],port=data['sshPort'],username=data.get('username','root'),password=data.get('password') or None,pkey=key_for(data),timeout=15,auth_timeout=20,banner_timeout=20,allow_agent=False,look_for_keys=False)
+    code,out=ssh_run(client,'id -u',timeout=15)
+    if code or out.strip()!='0':client.close();raise ValueError('节点管理需要 root SSH 账户')
+    return client
+
+def node_worker(job,data):
+    client=None
+    try:
+        with db() as c:c.execute("UPDATE jobs SET status='running' WHERE id=?",(job,))
+        event(job,'ssh','running','连接服务器并核对节点身份');client=connect(data)
+        remote='/root/.vpn-socks-jobs/'+job
+        code,_=ssh_run(client,'umask 077; mkdir -p '+shlex.quote(remote),timeout=15)
+        if code:raise ValueError('无法创建任务目录')
+        operation=data['_operation'];parameters={k:data[k] for k in ('domain','port','path','uuid') if k in data};parameters['operation']=operation
+        if operation=='delete':parameters['port']=data.get('listenPort',data['port'])
+        with client.open_sftp() as ftp:
+            ftp.put(str(PROJECT/'scripts/node-action.py'),remote+'/action.py')
+            with ftp.file(remote+'/request.json','w') as f:f.write(json.dumps(parameters))
+            ftp.chmod(remote+'/request.json',0o600)
+        event(job,'inbound','running','读取服务器节点' if operation=='discover' else '删除指定入站与独立守护')
+        code,out=ssh_run(client,'python3 '+shlex.quote(remote+'/action.py')+' '+shlex.quote(remote+'/request.json'),timeout=100)
+        if code:raise ValueError(deployment_failure(out,data))
+        result=json.loads(out.strip().splitlines()[-1])
+        if operation=='discover':
+            settings=json.loads(CONFIG.read_text());protected=[settings.get('hostname'),*settings.get('reserved_hosts',[])]
+            found=0
+            for item in result['nodes']:
+                if item['domain'] in protected:continue
+                params={**data,**item};register_node(params,{**item,'standby_ips':[],'country':item['region'],'warning':None},data['_actor']);found+=1
+            result={'discovered':found};event(job,'complete','done','已读取 '+str(found)+' 个节点')
+        else:
+            event(job,'inbound','done','指定入站已删除；其他入站和隧道保留')
+            with db() as c:c.execute("UPDATE nodes SET status='cleanup_pending',updated=? WHERE id=?",(time.time(),data['nodeId']))
+            if result.get('remaining_domain_nodes',0):
+                event(job,'cloudflare','done','同域名还有其他节点，保留共享 DNS 和回源规则')
+            else:
+                event(job,'cloudflare','running','清理该节点 DNS 和专属回源规则')
+                payload={k:data[k] for k in ('domain','ip','port','path')};payload.update(token=data['cfToken'],operation='delete')
+                cf=subprocess.run(['node',str(PROJECT/'runner/cf-task.mjs')],input=json.dumps(payload),capture_output=True,text=True,timeout=120)
+                if cf.returncode:raise ValueError('节点入站已删除，Cloudflare 清理待重试：'+deployment_failure(cf.stderr,data))
+            with db() as c:c.execute("UPDATE nodes SET status='deleted',updated=? WHERE id=?",(time.time(),data['nodeId']))
+            event(job,'complete','done','节点已删除')
+        with db() as c:c.execute("UPDATE jobs SET status='succeeded',result=? WHERE id=?",(json.dumps(result),job))
+    except Exception as e:
+        message=deployment_failure(str(e),data);event(job,'error','error',message)
+        with db() as c:c.execute("UPDATE jobs SET status='failed',error=? WHERE id=?",(message,job))
+    finally:
+        if client:client.close()
+        for key in ('password','privateKey','cfToken'):data[key]=''
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args):pass
@@ -205,6 +268,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as error:return self.send(503,{'error':str(error)})
         if not actor:return self.send(403,{'error':'Actor required'})
         with db() as c:
+            if path=='/nodes':
+                rows=c.execute("SELECT * FROM nodes WHERE actor=? ORDER BY updated DESC",(actor,)).fetchall()
+                return self.send(200,{'nodes':[{**dict(r),'config':json.loads(r['config']),'result':json.loads(r['result'])} for r in rows]})
             if path=='/jobs':
                 rows=c.execute('SELECT id,status,created,config,result,error FROM jobs WHERE actor=? ORDER BY created DESC LIMIT 20',(actor,)).fetchall()
                 return self.send(200,{'jobs':[{**dict(r),'config':json.loads(r['config']),'result':json.loads(r['result']) if r['result'] else None} for r in rows]})
@@ -214,6 +280,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 events=[dict(r) for r in c.execute('SELECT seq,time,step,state,message FROM events WHERE job=? ORDER BY seq',(job,))]
                 return self.send(200,{'id':job,'status':row['status'],'config':json.loads(row['config']),'result':json.loads(row['result']) if row['result'] else None,'error':row['error'],'events':events})
         self.send(404,{'error':'Not found'})
+    def node_task(self,actor):
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0<length<=65536:raise ValueError('请求大小无效')
+            data=json.loads(self.rfile.read(length));operation='delete' if self.path=='/delete' else 'discover'
+            if operation=='delete':
+                with db() as c:row=c.execute('SELECT * FROM nodes WHERE id=? AND actor=?',(data.get('nodeId',''),actor)).fetchone()
+                if not row:raise ValueError('节点不存在，请先从服务器读取节点')
+                config=json.loads(row['config'])
+                if data.get('confirmDomain')!=config['domain']:raise ValueError('确认域名不匹配')
+                data={**data,**config}
+            else:data.update(domain='discovery.invalid',port=443,path='/',region='ZZ')
+            data=validate(data);data.update(_operation=operation,_actor=actor)
+            with db() as c:
+                if c.execute("SELECT count(*) FROM jobs WHERE status IN ('running','queued')").fetchone()[0]>=4:return self.send(429,{'error':'任务队列已满'})
+                job=secrets.token_hex(16);public={k:data[k] for k in ('ip','domain','port','path','region','sshPort','_operation')}
+                if operation=='delete':public['nodeId']=data['nodeId']
+                c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',(job,actor,'queued',time.time(),json.dumps(public),None,None))
+            event(job,'queue','running','节点管理任务已进入队列');EXECUTOR.submit(node_worker,job,data)
+            return self.send(202,{'id':job,'status':'queued'})
+        except Exception as e:return self.send(400,{'error':str(e)})
     def do_POST(self):
         if not self.authorized():return self.send(401,{'error':'Unauthorized'})
         actor=self.headers.get('X-Actor','')
@@ -221,11 +308,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path=='/regions/refresh':
             try:return self.send(200,regions(force=True))
             except Exception as error:return self.send(503,{'error':str(error)})
+        if self.path in ('/discover','/delete'):return self.node_task(actor)
         if self.path!='/jobs':return self.send(404,{'error':'Not found'})
         try:
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=65536:raise ValueError('请求大小无效')
-            data=validate(json.loads(self.rfile.read(length)))
+            data=validate(json.loads(self.rfile.read(length)));data['_actor']=actor
             if data['region'] not in {r['code'] for r in regions()['regions']}:raise ValueError('该国家当前没有候选出口')
             with db() as c:
                 count=c.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]

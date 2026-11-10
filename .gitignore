@@ -21,3 +21,9 @@ ranking.json
 *.sqlite-*
 known_hosts
 runner-config.json
+
+web/control/dist/
+web/control/.openai/hosting.json
+vpn-control.json
+vpn-runner.json
+.auth*

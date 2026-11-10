@@ -1,6 +1,6 @@
 import hashlib,importlib.util,json,sqlite3,tempfile,threading,unittest,urllib.request,urllib.error,subprocess,os
 from pathlib import Path
-from unittest.mock import Mock,patch
+from unittest.mock import Mock,MagicMock,patch
 
 spec=importlib.util.spec_from_file_location('vpn_runner',Path(__file__).resolve().parents[1]/'runner'/'service.py')
 runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
@@ -86,5 +86,29 @@ class RunnerTests(unittest.TestCase):
   with patch.object(runner,'regions',return_value={'regions':[{'code':'RO','count':1}]}),patch.object(runner.EXECUTOR,'submit'):
    _,data=self.request('/jobs',self.payload)
   runner.init();_,job=self.request('/jobs/'+data['id']);self.assertEqual(job['status'],'interrupted')
+
+ def test_delete_requires_owned_record_and_exact_confirmation(self):
+  data={**self.payload,'_actor':'owner'};node={'link':'vless://uuid-one@node.example.com:443','exit_ip':'1.2.3.4'}
+  identity=runner.register_node(data,node,'owner')
+  body={'nodeId':identity,'confirmDomain':'wrong.example.com','password':'secret','cfToken':'secret'}
+  self.assertEqual(self.request('/delete',body)[0],400)
+  self.assertEqual(self.request('/delete',{**body,'confirmDomain':self.payload['domain']},actor='stranger')[0],400)
+  with patch.object(runner.EXECUTOR,'submit') as submit:
+   code,result=self.request('/delete',{**body,'confirmDomain':self.payload['domain']})
+   self.assertEqual(code,202);passed=submit.call_args.args[2];self.assertEqual(passed['ip'],self.payload['ip']);self.assertEqual(passed['uuid'],'uuid-one')
+  self.assertNotIn('secret',(runner.ROOT/'jobs.sqlite').read_bytes().decode('latin1'))
+ def test_multiple_nodes_same_server_domain_port_keep_separate_identity(self):
+  first={**self.payload,'path':'/one'};second={**self.payload,'path':'/two'}
+  runner.register_node(first,{'link':'vless://one@node.example.com:443','listen_port':20000},'owner')
+  runner.register_node(second,{'link':'vless://two@node.example.com:443','listen_port':20001},'owner')
+  code,data=self.request('/nodes');self.assertEqual(code,200);self.assertEqual(len(data['nodes']),2)
+  self.assertEqual({n['config']['listenPort'] for n in data['nodes']},{20000,20001});self.assertEqual(len(self.request('/nodes',actor='stranger')[1]['nodes']),0)
+ def test_shared_domain_deletion_preserves_cloudflare(self):
+  job='a'*32;data={**self.payload,'_actor':'owner','_operation':'delete','nodeId':'b'*32,'uuid':'one'}
+  with runner.db() as c:c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',(job,'owner','queued',runner.time.time(),json.dumps({}),None,None))
+  client=MagicMock();client.open_sftp.return_value.__enter__.return_value.file.return_value.__enter__.return_value=Mock()
+  with patch.object(runner,'connect',return_value=client),patch.object(runner,'ssh_run',side_effect=[(0,''),(0,json.dumps({'node_deleted':True,'remaining_domain_nodes':1}))]),patch.object(runner.subprocess,'run') as cf:
+   runner.node_worker(job,data);cf.assert_not_called()
+  _,result=self.request('/jobs/'+job);self.assertEqual(result['status'],'succeeded')
 
 if __name__=='__main__':unittest.main()

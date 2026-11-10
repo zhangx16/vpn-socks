@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {configure,validateConfig,desiredRule,verify} from '../worker/core.mjs';
+import {configure,validateConfig,desiredRule,verify,removeNode} from '../worker/core.mjs';
 const config={domain:'node.example.com',ip:'8.8.4.4',port:35001,path:'/ws',ssl:'full',token:'not-a-real-token'};
 function fake({failTLS=false}={}){
  const calls=[];
@@ -50,4 +50,24 @@ test('write failure restores the rule already changed and does not touch DNS',as
 });
 test('HTTP 521 is reported as pending rather than a successful deployment',async()=>{
  const result=await verify(config,async()=>({status:521}));assert.equal(result.ok,false);assert.equal(result.status,521);
+});
+
+function deleteMock({changedDNS=false,changedPort=false}={}){
+ const calls=[];
+ const fetcher=async(url,options={})=>{
+  const path=url.replace('https://api.cloudflare.com/client/v4',''),method=options.method||'GET';calls.push({path,method});let result;
+  if(path==='/zones?name=node.example.com')result=[];
+  else if(path==='/zones?name=example.com')result=[{id:'zone',name:'example.com'}];
+  else if(path.includes('/dns_records?'))result=[{id:'owned',type:'A',name:config.domain,content:changedDNS?'1.1.1.1':config.ip}];
+  else if(path.includes('/phases/'))result={id:'rules',rules:[{...desiredRule({...config,port:changedPort?9999:config.port},path.includes('origin')?'origin':'tls'),id:'managed'},{id:'foreign',ref:'foreign',expression:'ends_with(http.host,"example.com")',action:'route'}]};
+  else if(method==='DELETE')result={id:'removed'};
+  else throw Error('Unexpected '+method+' '+path);
+  return Response.json({success:true,result});
+ };return {calls,fetcher};
+}
+test('delete touches only exact-host managed rules and matching A record',async()=>{
+ const {calls,fetcher}=deleteMock();const result=await removeNode(config,fetcher);assert.equal(result.dnsDeleted,1);assert.equal(result.rulesDeleted,2);assert.ok(calls.filter(x=>x.method==='DELETE').every(x=>!x.path.includes('foreign')));
+});
+test('changed DNS or origin port aborts before any delete',async()=>{
+ for(const options of [{changedDNS:true},{changedPort:true}]){const {calls,fetcher}=deleteMock(options);await assert.rejects(removeNode(config,fetcher));assert.ok(calls.every(x=>x.method==='GET'))}
 });
